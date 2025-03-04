@@ -1,89 +1,117 @@
-# backend/main.py
-# Trading Assistant using Google's Gemini API with Chain of Thought
+#!/usr/bin/env python3
+# main.py - Integrated backend with new trading agent
 
 import asyncio
 import json
 import logging
 import os
+import sys
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Callable, Union
 from uuid import uuid4
 
 import motor.motor_asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field  # Import Field
+from pydantic import BaseModel, Field
 import uvicorn
+from dotenv import load_dotenv, find_dotenv
 
-# 确保代理目录可在系统路径中找到
-import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Load environment variables
+load_dotenv(find_dotenv())
 
-from agents.trading_assistant import (
-    TradingAssistantDeps,
-    run_trading_analysis,
-    ThinkingStep,
-    TokenInfo,
-    TradingAnalysis,
-    trading_agent,
-    approve_transaction,
-    sign_transaction,
-    fetch_token_information,
-    analyze_contract_security,
-    check_liquidity,
-)
-
-# 配置日志
-logging.basicConfig(level=logging.INFO)
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# 环境变量配置
-# 使用默認值 (for debugging only!)
-PROJECT_ID = os.environ.get("GOOGLE_PROJECT_ID", "your-project-id")
-SERVICE_ACCOUNT_FILE = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "/path/to/your/credentials.json")
-MODEL = "gemini-2.0-flash"
-GOOGLE_SEARCH_API_KEY = os.environ.get("GOOGLE_SEARCH_API_KEY", "your-search-api-key")
-GOOGLE_CSE_ID = os.environ.get("GOOGLE_CSE_ID", "your-cse-id")
+# Ensure agent module is in path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# --- Google Cloud Configuration ---
+PROJECT_ID = os.getenv("GOOGLE_PROJECT_ID")
+SERVICE_ACCOUNT_FILE = os.path.abspath("./gemini_defi_agent.json")
+LOCATION = os.getenv("LOCATION", "us-central1")
+MODEL = os.getenv("MODEL", "gemini-2.0-flash")
+
+# --- API Keys ---
+GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
+GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
+SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# OKX Web3 credentials
+OKX_WEB3_PROJECT_ID = os.getenv("OKX_WEB3_PROJECT_ID")
+OKX_WEB3_PROJECT_KEY = os.getenv("OKX_WEB3_PROJECT_KEY")
+OKX_WEB3_PROJECT_SECRET = os.getenv("OKX_WEB3_PROJECT_SECRET")
+OKX_WEB3_PROJECT_PASSWRD = os.getenv("OKX_WEB3_PROJECT_PASSWRD")
+
+# MongoDB configuration
 MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
 DATABASE_NAME = os.getenv("DATABASE_NAME", "trading_assistant")
-print(PROJECT_ID, SERVICE_ACCOUNT_FILE, MODEL, GOOGLE_SEARCH_API_KEY, GOOGLE_CSE_ID, MONGODB_URL, DATABASE_NAME)
 
-# 创建FastAPI应用
+print(f"Using model: {MODEL} in {LOCATION}")
+print(f"MongoDB URL: {MONGODB_URL}, Database: {DATABASE_NAME}")
+
+# Import your trading agent classes and tools
+try:
+    from agents.trading_assistant import (
+        TradingAssistantDeps, trading_agent, TokenInfo, TradingAnalysis, ThinkingStep,
+        initialize_clients, run_trading_analysis
+    )
+except ImportError:
+    # Rename to match your actual file structure
+    from agents.trade_bot_agent import (
+        TradingAssistantDeps, trading_agent, TokenInfo, TradingAnalysis, ThinkingStep
+    )
+
+
+    # Define this since we're importing from the new file
+    async def initialize_clients():
+        from agents.trade_bot_agent import initialize_clients as init
+        await init()
+
+
+    # Define run_trading_analysis if not present in the new agent
+    async def run_trading_analysis(query, deps):
+        return await trading_agent.run(query, deps=deps)
+
+# Create FastAPI app
 app = FastAPI(title="Trading Assistant API")
 
-# 添加CORS中间件
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 允许所有源（生产环境中应该限制）
+    allow_origins=["*"],  # In production, restrict to specific origins
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 创建MongoDB客户端
+# Create MongoDB client
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URL)
 db = client[DATABASE_NAME]
 
 
-# 数据模型
+# --- Data Models ---
 class User(BaseModel):
     wallet_address: str
-    created_at: datetime = datetime.now()
+    created_at: datetime = Field(default_factory=datetime.now)
     has_agent: bool = False
-    multisig_address: Optional[str] = None  # 新增：多签钱包地址
+    multisig_address: Optional[str] = None
 
 
 class Message(BaseModel):
     id: str
     sender: str
-    text: str | dict
+    text: Union[str, dict]
     message_type: Optional[str] = None
-    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())  # Store as ISO string
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
     action: Optional[Dict[str, Any]] = None
 
     class Config:
         json_encoders = {
-            datetime: lambda v: v.isoformat(),  # Serialize datetime to ISO string
+            datetime: lambda v: v.isoformat(),
         }
 
 
@@ -93,11 +121,8 @@ class Conversation(BaseModel):
 
 
 # --- Helper Functions ---
-
 def _serialize_for_mongo(data: Any) -> Any:
-    """
-    Recursively serializes data to be compatible with MongoDB.
-    """
+    """Recursively serializes data to be compatible with MongoDB."""
     if isinstance(data, BaseModel):
         return data.dict()
     elif isinstance(data, list):
@@ -111,19 +136,18 @@ def _serialize_for_mongo(data: Any) -> Any:
 
 
 def _deserialize_from_mongo(data: Any) -> Any:
-    """
-    Recursively deserializes data retrieved from MongoDB.
-    """
+    """Recursively deserializes data retrieved from MongoDB."""
     if isinstance(data, list):
         return [_deserialize_from_mongo(item) for item in data]
     elif isinstance(data, dict):
         # Attempt to reconstruct Pydantic models
-        if "symbol" in data and "blockchain" in data and "contract_address" in data and "project_url" in data:
+        if "symbol" in data and "blockchain" in data and all(
+                key in data for key in ["contract_address", "project_url"]):
             try:
                 return TokenInfo(**data)
             except:
                 pass
-        if "question" in data and "answer" in data:
+        if "phase" in data and "question" in data and "answer" in data:
             try:
                 return ThinkingStep(**data)
             except:
@@ -144,7 +168,7 @@ def _deserialize_from_mongo(data: Any) -> Any:
         return data
 
 
-# 活跃WebSocket连接管理
+# --- Connection Manager ---
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
@@ -157,26 +181,32 @@ class ConnectionManager:
             "last_message_time": datetime.now(),
             "agent_busy": False
         }
+        logger.info(f"WebSocket connection established for {wallet_address}")
 
     def disconnect(self, wallet_address: str):
         if wallet_address in self.active_connections:
             del self.active_connections[wallet_address]
         if wallet_address in self.user_sessions:
             del self.user_sessions[wallet_address]
+        logger.info(f"WebSocket connection closed for {wallet_address}")
 
     async def send_message(self, wallet_address: str, message: Dict[str, Any]):
-        """向特定用户发送消息"""
+        """Send a message to a specific user"""
         if wallet_address in self.active_connections:
             websocket = self.active_connections[wallet_address]
-            await websocket.send_json(message)
+            try:
+                await websocket.send_json(message)
+                logger.debug(f"Message sent to {wallet_address}: {message.get('id', 'unknown')}")
+            except Exception as e:
+                logger.error(f"Error sending message to {wallet_address}: {e}")
 
     async def broadcast(self, message: Dict[str, Any]):
-        """向所有连接的用户广播消息"""
+        """Broadcast a message to all connected users"""
         for wallet_address in self.active_connections:
             await self.send_message(wallet_address, message)
 
     async def update_status(self, wallet_address: str, status: str):
-        """更新并发送状态消息"""
+        """Update and send a status message"""
         status_message = {
             "id": f"status-{uuid4()}",
             "sender": "agent",
@@ -189,30 +219,31 @@ class ConnectionManager:
         await save_message(wallet_address, status_message)
 
     def set_agent_busy(self, wallet_address: str, busy: bool):
-        """设置用户的Agent是否正在处理请求"""
+        """Set whether the user's agent is busy processing a request"""
         if wallet_address in self.user_sessions:
             self.user_sessions[wallet_address]["agent_busy"] = busy
+            logger.info(f"Agent for {wallet_address} set to {'busy' if busy else 'available'}")
 
     def is_agent_busy(self, wallet_address: str) -> bool:
-        """检查用户的Agent是否正在处理请求"""
+        """Check if the user's agent is busy processing a request"""
         if wallet_address in self.user_sessions:
             return self.user_sessions[wallet_address]["agent_busy"]
         return False
 
 
-# 创建连接管理器实例
+# Create connection manager instance
 manager = ConnectionManager()
 
 
-# 数据库操作函数
+# --- Database Functions ---
 async def get_user(wallet_address: str) -> Optional[Dict[str, Any]]:
-    """根据钱包地址获取用户"""
+    """Get a user by wallet address"""
     user = await db.users.find_one({"wallet_address": wallet_address})
     return _deserialize_from_mongo(user) if user else None
 
 
 async def create_user(wallet_address: str) -> Dict[str, Any]:
-    """创建新用户"""
+    """Create a new user"""
     user = User(wallet_address=wallet_address)
     user_dict = _serialize_for_mongo(user)
     await db.users.insert_one(user_dict)
@@ -220,7 +251,7 @@ async def create_user(wallet_address: str) -> Dict[str, Any]:
 
 
 async def set_has_agent(wallet_address: str, has_agent: bool) -> bool:
-    """设置用户是否有Agent"""
+    """Set whether the user has an agent"""
     result = await db.users.update_one(
         {"wallet_address": wallet_address},
         {"$set": {"has_agent": has_agent}}
@@ -229,7 +260,7 @@ async def set_has_agent(wallet_address: str, has_agent: bool) -> bool:
 
 
 async def save_message(wallet_address: str, message_in: Dict[str, Any]) -> bool:
-    """保存消息到数据库, 接受字典"""
+    """Save a message to the database"""
     message = _serialize_for_mongo(message_in)
     message["id"] = message.get("id", str(uuid4()))
     message["message_type"] = message.get("message_type", "normal")
@@ -248,36 +279,35 @@ async def save_message(wallet_address: str, message_in: Dict[str, Any]) -> bool:
 
 async def get_messages(wallet_address: str, show_history: bool = False) -> List[Dict[str, Any]]:
     """
-    获取用户的历史消息。
+    Get a user's message history.
 
     Args:
-        wallet_address: 用户的钱包地址。
-        show_history: 是否显示完整的历史记录。默认为 False，只显示最近的最终结果。
+        wallet_address: The user's wallet address.
+        show_history: Whether to show the complete history. Default is False, showing only the most recent final result.
 
     Returns:
-        消息列表。
+        A list of messages.
     """
     conversation = await db.conversations.find_one({"wallet_address": wallet_address})
     if conversation and "messages" in conversation:
         messages = _deserialize_from_mongo(conversation["messages"])
         if show_history:
-             # 返回所有非 "thinking" 类型的消息
+            # Return all non-"thinking" type messages
             return [msg for msg in messages if msg.get("message_type") != "thinking"]
-
         else:
-            # 只返回最近一次的最终结果 (normal 类型，且不是 tool_call)
+            # Only return the most recent final result (normal type, and not a tool_call)
             for msg in reversed(messages):
-                if msg.get("message_type") == "normal" :
+                if msg.get("message_type") == "normal":
                     return [msg]
-            return []  # 如果没有找到，返回空列表
+            return []  # If none found, return empty list
     return []
 
 
 async def get_previous_messages(wallet_address: str) -> List[Dict[str, Any]]:
-    """從資料庫中獲取先前的對話訊息"""
+    """Get previous conversation messages from the database"""
     conversation = await db.conversations.find_one({"wallet_address": wallet_address})
     if conversation and "messages" in conversation:
-        # 排除 'status' 類型的訊息，因為它們只是狀態更新，不影響對話上下文
+        # Exclude 'status' type messages, as they're just status updates and don't affect conversation context
         return [
             _deserialize_from_mongo(msg)
             for msg in conversation["messages"]
@@ -288,19 +318,19 @@ async def get_previous_messages(wallet_address: str) -> List[Dict[str, Any]]:
 
 async def deploy_multisig_wallet(wallet_address: str) -> str:
     """
-    模拟部署 2/2 多签钱包合约。
+    Simulate deploying a 2/2 multisig wallet contract.
 
     Args:
-        wallet_address: 用户的钱包地址。
+        wallet_address: The user's wallet address.
 
     Returns:
-        模拟的多签钱包合约地址。
+        A simulated multisig wallet contract address.
     """
-    # 在真实应用中，这里应该调用区块链相关的代码来部署合约
-    # 这里只是模拟，生成一个唯一的合约地址
+    # In a real app, this would call blockchain code to deploy a contract
+    # This is just a simulation, generating a unique contract address
     multisig_address = f"0xms{uuid4().hex}"
 
-    # 更新用户信息，保存多签钱包地址
+    # Update user information, save the multisig wallet address
     await db.users.update_one(
         {"wallet_address": wallet_address},
         {"$set": {"multisig_address": multisig_address}}
@@ -310,19 +340,19 @@ async def deploy_multisig_wallet(wallet_address: str) -> str:
 
 async def add_token_to_whitelist(multisig_address: str, token_address: str) -> bool:
     """
-    模拟将代币添加到多签钱包的白名单。
+    Simulate adding a token to the multisig wallet's whitelist.
 
     Args:
-        multisig_address: 多签钱包地址。
-        token_address: 要添加的代币合约地址。
+        multisig_address: The multisig wallet address.
+        token_address: The token contract address to add.
 
     Returns:
-        True 表示添加成功, False 表示失败
+        True if added successfully, False if failed
     """
-    # 在实际应用中，这里应该调用多签合约的相应方法
-    # 这里只是模拟
+    # In a real app, this would call the multisig contract's method
+    # This is just a simulation
     logger.info(f"Adding {token_address} to whitelist of {multisig_address}")
-    # 假设有一个名为 multisig_whitelists 的集合, 实际应用中根据你的合约设计来
+    # Assume a collection named multisig_whitelists, adjust based on your contract design
     await db.multisig_whitelists.update_one(
         {"multisig_address": multisig_address},
         {"$addToSet": {"whitelisted_tokens": token_address}},
@@ -330,8 +360,9 @@ async def add_token_to_whitelist(multisig_address: str, token_address: str) -> b
     )
     return True
 
+
 async def clarify_with_user(wallet_address: str, question: str) -> None:
-    """向用户发送澄清问题，并保存消息"""
+    """Send a clarification question to the user and save the message"""
     clarification_message = Message(
         id=str(uuid4()),
         sender="agent",
@@ -341,47 +372,52 @@ async def clarify_with_user(wallet_address: str, question: str) -> None:
     await save_message(wallet_address, clarification_message)
     await manager.send_message(wallet_address, clarification_message)
 
-# 消息处理函数
-async def process_message(wallet_address: str, query: str) -> Dict[str, Any]:
-    """處理使用者訊息並返回AI Agent的響應"""
 
-    # 建立依賴項
+# --- Message Processing Helper Function ---
+async def process_message(wallet_address: str, query: str) -> Dict[str, Any]:
+    """Process a user message and return the AI Agent's response"""
+
+    # Create dependencies
     deps = TradingAssistantDeps(
-        request={"wallet_address": wallet_address},  # 將 wallet_address 放入 request
-        update_status_func=lambda _, status: manager.update_status(wallet_address, status),
-        send_message_func=lambda _, message: manager.send_message(wallet_address, message),
+        request={"wallet_address": wallet_address},  # Pass wallet_address in request
+        update_status_func=lambda req, status: manager.update_status(wallet_address, status),
+        send_message_func=lambda req, message: manager.send_message(wallet_address, message),
+        agent_name="trading_agent"
     )
 
-    # 設置Agent狀態為忙碌
+    # Set Agent status to busy
     manager.set_agent_busy(wallet_address, True)
     try:
-        # 1. 載入歷史訊息
+        # 1. Load history messages
         previous_messages = await get_previous_messages(wallet_address)
         previous_messages_text = "\n".join(
             [f"{msg['sender']}: {msg['text']}" for msg in previous_messages]
         )
 
-        # 2. 組合歷史訊息和當前查詢
+        # 2. Combine history messages and current query
         full_query = f"{previous_messages_text}\nUser: {query}"
 
-        # 3. 運行交易分析
+        # 3. Run trading analysis
         result = await run_trading_analysis(full_query, deps)
 
         if isinstance(result, Exception):
             return {"error": str(result)}
-        return {"result": result.dict()}  # 返回 Pydantic 模型的字典形式
 
+        # Return Pydantic model as dict
+        return {"result": result.dict() if hasattr(result, "dict") else result}
+
+    except Exception as e:
+        logger.exception(f"Error processing message: {e}")
+        return {"error": str(e)}
     finally:
-        # 設置Agent狀態為空閒
+        # Set Agent status to idle
         manager.set_agent_busy(wallet_address, False)
 
 
-
-# WebSocket路由
-@app.websocket("/ws/{address}")  # Use path parameter
+# --- WebSocket Route ---
+@app.websocket("/ws/{address}")
 async def websocket_endpoint(websocket: WebSocket, address: str):
-    """WebSocket處理函數"""
-    wallet_address = address
+    """WebSocket handler function"""
     wallet_address = address.lower()
     logger.info(f"New WebSocket connection from: {wallet_address}")
     await manager.connect(wallet_address, websocket)
@@ -448,14 +484,17 @@ async def websocket_endpoint(websocket: WebSocket, address: str):
 
 
 async def process_and_reply(wallet_address: str, query: str):
-    """非同步處理訊息並逐步回覆"""
+    """Asynchronously process the message and send step-by-step replies"""
     try:
         result = await process_message(wallet_address, query)
         logger.info(f"Result from process_message: {result}")
 
         if "error" in result:
             error_message = Message(
-                id=str(uuid4()), sender="agent", text=result["error"], message_type="error"
+                id=str(uuid4()),
+                sender="agent",
+                text=result["error"],
+                message_type="error"
             ).dict()
             await save_message(wallet_address, error_message)
             await manager.send_message(wallet_address, error_message)
@@ -464,7 +503,7 @@ async def process_and_reply(wallet_address: str, query: str):
         analysis_result = result["result"]
         logger.info(f"Analysis result: {analysis_result}")
 
-        # 根據 safe_to_execute 和 thinking_steps 決定 action 類型
+        # Determine action type based on safe_to_execute and thinking_steps
         agent_message = Message(
             id=str(uuid4()),
             sender="agent",
@@ -474,12 +513,13 @@ async def process_and_reply(wallet_address: str, query: str):
 
         if "safe_to_execute" in analysis_result:
             if analysis_result["safe_to_execute"]:
-                # 检查 thinking_steps 中是否有 "clarification" 类型的消息
+                # Check if there are any "clarification" type messages in thinking_steps
                 needs_clarification = any(
-                    step.get("message_type") == "clarification" for step in analysis_result.get("thinking_steps", [])
+                    step.get("message_type") == "clarification"
+                    for step in analysis_result.get("thinking_steps", [])
                 )
                 if needs_clarification:
-                    # 如果需要澄清，则不执行后续操作，直接发送澄清问题
+                    # If clarification is needed, don't proceed with further actions
                     return
 
                 agent_message.action = {
@@ -488,7 +528,7 @@ async def process_and_reply(wallet_address: str, query: str):
                     "data": analysis_result,
                 }
 
-                #  執行交易
+                # Execute transaction
                 await handle_ai_transaction(wallet_address, analysis_result)
             else:
                 agent_message.action = {
@@ -515,8 +555,8 @@ async def process_and_reply(wallet_address: str, query: str):
 
 
 async def handle_ai_transaction(wallet_address: str, analysis_result: dict):
-    """AI 處理交易流程"""
-    logger.info(f"handle ai transaction with: {analysis_result}")
+    """AI transaction handling process"""
+    logger.info(f"Handling AI transaction with: {analysis_result}")
     user = await get_user(wallet_address)
     if not user or not user.get("multisig_address"):
         error_message = Message(
@@ -527,59 +567,58 @@ async def handle_ai_transaction(wallet_address: str, analysis_result: dict):
         ).dict()
         await save_message(wallet_address, error_message)
         await manager.send_message(wallet_address, error_message)
-
         return
 
     try:
-        # 從分析結果中獲取代幣資訊
+        # Get token information from analysis result
         source_token = analysis_result["source_token"]
         target_token = analysis_result["target_token"]
 
-        # 發送狀態更新
+        # Send status update
         await manager.update_status(wallet_address, "AI is preparing to execute the transaction...")
 
-        # 模擬交易準備階段
-        await asyncio.sleep(1)  # 模擬延遲
+        # Simulate transaction preparation stage
+        await asyncio.sleep(1)  # Simulate delay
 
-        # 1. AI 批准交易 (消息)
+        # 1. AI approves transaction (message)
         approval_message = Message(
             id=str(uuid4()),
             sender="agent",
-            text=f"我正在批准將 {source_token['symbol']} 兌換成 {target_token['symbol']} 的交易...",
+            text=f"I'm approving the exchange of {source_token['symbol']} for {target_token['symbol']}...",
             message_type="transaction",
         ).dict()
         await save_message(wallet_address, approval_message)
         await manager.send_message(wallet_address, approval_message)
         await asyncio.sleep(1.5)
 
-        # 2. AI 簽名交易 (消息)
+        # 2. AI signs transaction (message)
         signing_message = Message(
             id=str(uuid4()),
             sender="agent",
-            text=f"現在正在使用我的多重簽名金鑰簽署交易...",
+            text=f"Now signing the transaction with my multisig key...",
             message_type="transaction",
         ).dict()
         await save_message(wallet_address, signing_message)
         await manager.send_message(wallet_address, signing_message)
         await asyncio.sleep(1.5)
 
-        # 3.  從 thinking_steps 中提取 tx_hash
-        # (更正：直接从工具函数的返回值中获取，而不是 thinking_steps)
+        # 3. Extract tx_hash from thinking_steps
         tx_hash = None
-        for step in analysis_result['thinking_steps']:
-            if step['question'] == 'Approve transaction details':
-                tx_hash = step['answer'].get('tx_hash')
-                break  # 找到就退出循环
-        if not tx_hash:
-            # 如果没有找到，可能是因为流程改变，或者工具函数没有返回
-            logger.warning("Transaction hash (tx_hash) not found in thinking steps.")
-            tx_hash = "0x" + uuid4().hex  # 生成模擬
+        for step in analysis_result.get('thinking_steps', []):
+            if step.get('question') == 'Approve transaction details':
+                tx_hash = step.get('answer', {}).get('tx_hash')
+                break
 
-        # 4. 模擬發送交易到區塊鏈
+        if not tx_hash:
+            # If not found, generate a simulated one
+            logger.warning("Transaction hash (tx_hash) not found in thinking steps.")
+            tx_hash = "0x" + uuid4().hex
+
+        # 4. Simulate sending transaction to blockchain
         submitting_message = Message(
             id=str(uuid4()),
             sender="agent",
-            text=f"交易已提交到區塊鏈。交易哈希：{tx_hash}",
+            text=f"Transaction submitted to blockchain. Transaction hash: {tx_hash}",
             message_type="transaction",
             action={
                 "type": "submitted",
@@ -590,22 +629,22 @@ async def handle_ai_transaction(wallet_address: str, analysis_result: dict):
         await manager.send_message(wallet_address, submitting_message)
 
     except Exception as e:
-        logger.exception(f"AI 交易處理過程中發生錯誤：{e}")
+        logger.exception(f"Error during AI transaction processing: {e}")
         error_message = Message(
             id=str(uuid4()),
             sender="agent",
-            text=f"處理交易失敗：{str(e)}",
+            text=f"Transaction processing failed: {str(e)}",
             message_type="error",
         ).dict()
         await save_message(wallet_address, error_message)
         await manager.send_message(wallet_address, error_message)
 
 
-# API 路由
+# --- API Routes ---
 @app.post("/api/agent")
 async def create_agent(wallet_address: str):
     """
-    创建 Agent 记录（不部署多签钱包）。
+    Create an Agent record (without deploying a multisig wallet).
     """
     wallet_address = wallet_address.lower()
     user = await get_user(wallet_address)
@@ -619,7 +658,7 @@ async def create_agent(wallet_address: str):
 @app.get("/api/agent-status/{wallet_address}")
 async def get_agent_status(wallet_address: str):
     """
-    检查用户的 Agent 状态。
+    Check a user's Agent status.
     """
     wallet_address = wallet_address.lower()
     user = await get_user(wallet_address)
@@ -635,7 +674,7 @@ async def get_agent_status(wallet_address: str):
 @app.post("/api/deploy-multisig")
 async def deploy_multisig(wallet_address: str):
     """
-    部署多签钱包（模拟）。
+    Deploy a multisig wallet (simulation).
     """
     wallet_address = wallet_address.lower()
     user = await get_user(wallet_address)
@@ -657,7 +696,7 @@ async def deploy_multisig(wallet_address: str):
 
 @app.get("/api/messages")
 async def get_user_messages(wallet_address: str, show_history: bool = Query(False)):
-    """取得使用者訊息的 API，可選擇是否包含思考過程"""
+    """Get user messages API, with option to include thinking process"""
     wallet_address = wallet_address.lower()
     messages = await get_messages(wallet_address, show_history)
     return {"messages": messages}
@@ -669,19 +708,19 @@ async def user_signature(
         tx_hash: str,
         user_signature: str
 ):
-    """接收使用者對交易的簽名"""
+    """Receive user signature for a transaction"""
     wallet_address = wallet_address.lower()
-    logger.info(f"收到使用者 {wallet_address} 對交易 {tx_hash} 的簽名")
+    logger.info(f"Received user {wallet_address} signature for transaction {tx_hash}")
 
-    # 建立交易完成訊息
+    # Create transaction completion message
     completion_message = Message(
         id=str(uuid4()),
         sender="system",
-        text="交易成功完成！多重簽名交易已提交到區塊鏈。",
+        text="Transaction successfully completed! Multisig transaction submitted to blockchain.",
         message_type="transaction",
         action={
             "type": "completed",
-            "text": "交易已完成",
+            "text": "Transaction completed",
             "data": {
                 "tx_hash": tx_hash,
                 "user_signature": user_signature,
@@ -697,9 +736,9 @@ async def user_signature(
 
     return {
         "success": True,
-        "message": "交易已完成",
+        "message": "Transaction completed",
         "tx_hash": tx_hash,
-        "block_number": 12345678,  # 模擬區塊號
+        "block_number": 12345678,  # Simulated block number
     }
 
 
@@ -707,20 +746,20 @@ async def user_signature(
 async def user_reject_transaction(
         wallet_address: str,
         tx_hash: str,
-        reason: Optional[str] = "使用者拒絕交易"
+        reason: Optional[str] = "User rejected transaction"
 ):
-    """使用者拒絕交易"""
+    """User transaction rejection"""
     wallet_address = wallet_address.lower()
-    logger.info(f"使用者 {wallet_address} 拒絕了交易 {tx_hash}：{reason}")
+    logger.info(f"User {wallet_address} rejected transaction {tx_hash}: {reason}")
 
     rejection_message = Message(
         id=str(uuid4()),
         sender="system",
-        text=f"交易被拒絕: {reason}",
+        text=f"Transaction rejected: {reason}",
         message_type="transaction",
         action={
             "type": "rejected",
-            "text": "交易被拒絕",
+            "text": "Transaction rejected",
             "data": {
                 "tx_hash": tx_hash,
                 "reason": reason
@@ -733,30 +772,34 @@ async def user_reject_transaction(
     if wallet_address in manager.active_connections:
         await manager.send_message(wallet_address, rejection_message)
 
-    return {"success": True, "message": "交易被拒絕"}
+    return {"success": True, "message": "Transaction rejected"}
 
 
-# 初始化資料庫索引
+# --- Initialize database indexes ---
 @app.on_event("startup")
 async def create_indexes():
-    """建立資料庫索引"""
+    """Create database indexes"""
     try:
         await db.users.create_index("wallet_address", unique=True)
         await db.conversations.create_index("wallet_address")
-        #  multisig_whitelists 索引 (如果使用)
+        # Multisig_whitelists index (if used)
         await db.multisig_whitelists.create_index("multisig_address")
-        logger.info("資料庫索引建立成功")
+        logger.info("Database indexes created successfully")
+
+        # Initialize API clients
+        await initialize_clients()
+        logger.info("API clients initialized successfully")
     except Exception as e:
-        logger.error(f"建立資料庫索引失敗：{e}")
+        logger.error(f"Error creating database indexes: {e}")
 
 
-# 健康檢查端點
+# --- Health check endpoint ---
 @app.get("/health")
 async def health_check():
-    """簡單的健康檢查 API"""
+    """Simple health check API"""
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
 
 
-# 執行應用程式
+# --- Run application ---
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")
