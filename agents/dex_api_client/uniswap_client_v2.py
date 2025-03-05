@@ -1,4 +1,6 @@
 import time
+from pprint import pprint
+
 import aiohttp
 from typing import List, Dict, Optional
 
@@ -93,4 +95,37 @@ async def main():
 
     await client.close()  # 关闭 HTTP session
 
-asyncio.run(main())
+# asyncio.run(main())
+result=  {'0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b': {'symbol': 'VIRTUAL', 'totalLiquidity': '26054744.597066904096188239', 'tradeVolumeUSD': '1347906956.382663872305170356923525', 'Price': '1.125061299479751985030091538967279', 'security': {'Risks': {'security_vulnerabilities': 'The token is mintable and has a hidden owner, which raises concerns about potential manipulation or rug pulls. The presence of a high number of holders (607,897) may indicate a risk of market volatility due to large sell-offs.', 'regulatory_concerns': 'As a cryptocurrency, it may face scrutiny from regulatory bodies, especially if it does not comply with local laws regarding securities and anti-money laundering.', 'market_volatility': 'The liquidity across various DEXs is relatively low, which can lead to significant price fluctuations and slippage during trading.'}, 'Potential Growth': {'future_adoption': 'The token has a large holder base, which could indicate potential for community-driven growth. However, the lack of clear partnerships or use cases may hinder broader adoption.', 'partnerships': 'No significant partnerships or collaborations have been reported, which could limit its growth potential in competitive markets.', 'competitive_positioning': 'The token operates in a crowded market with many alternatives, making it challenging to establish a unique value proposition.'}, 'Conclusion': {'Security Score': '4', 'Profit Potential': '5', 'Conclusion': 'In the short term, the token may experience volatility due to its liquidity and holder distribution. Long-term prospects are uncertain without clear use cases or partnerships, but community interest could drive some growth.'}}}, '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913': {'symbol': 'USDC', 'totalLiquidity': '8937465.471616', 'tradeVolumeUSD': '938525832.5478507830583625910779652', 'Price': '0.8888404573710050141909697719841803'}}
+pprint(result)
+securitry_text = ""
+for key, value in result.items():
+    securitry_text += f"Token: {key}\n"
+    for k, v in value.items():
+        if k == "security":
+            securitry_text += f"Security:\n"
+            for k1, v1 in v.items():
+                if k1 == "Risks":
+                    securitry_text += " - Risks:\n"
+                    for k2, v2 in v1.items():
+                        securitry_text += f"   - {k2}: {v2}\n"
+                elif k1 == "Potential Growth":
+                    securitry_text += " - Potential Growth:\n"
+                    for k2, v2 in v1.items():
+                        securitry_text += f"   - {k2}: {v2}\n"
+                elif k1 == "Conclusion":
+                    securitry_text += " - Conclusion:\n"
+                    for k2, v2 in v1.items():
+                        securitry_text += f"   - {k2}: {v2}\n"
+
+        else:
+            # if v is int or float, round to 8 decimal places
+            try:
+                v = float(v)
+            except:
+                pass
+            if isinstance(v, (int, float)):
+                v = round(v, 8)
+            securitry_text += f"{k}: {v}\n"
+
+print(securitry_text)

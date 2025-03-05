@@ -230,3 +230,5 @@ cython_debug/
 
 /agents/gemini_defi_agent.json
 /service_account_key.json
+/gemini_defi_agent.json
+/poetry.lock

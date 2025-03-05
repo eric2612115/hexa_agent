@@ -285,7 +285,7 @@ class ThirdPartyClient:
         }"""
         try:
             # If structured data is provided, use it as the primary input
-                # Otherwise, fall back to the legacy text input
+            # Otherwise, fall back to the legacy text input
             data = {
                 "original_token": original_token,
                 "target_token": target_token,
@@ -300,12 +300,15 @@ class ThirdPartyClient:
     async def get_top5_tokens(self):
         return await self._get("top5_tokens")
 
+
 # Initialize clients as None
 okx_client: OkxWeb3Client = None
 third_party_client: ThirdPartyClient = None
 
+
 async def generate_content(text):
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + os.getenv("GEMINI_API_KEY")
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + os.getenv(
+        "GEMINI_API_KEY")
     headers = {
         "Content-Type": "application/json"
     }
@@ -317,6 +320,7 @@ async def generate_content(text):
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=data) as response:
             return await response.json()
+
 
 # --- MODELS ---
 class TokenInfo(BaseModel):
@@ -401,6 +405,7 @@ def setup_detailed_logging():
 # Call this at the start of your program
 log_file = setup_detailed_logging()
 print(f"Detailed logs will be saved to: {log_file}")
+
 
 class PortfolioRecommendation(BaseModel):
     """Represents a recommended investment portfolio."""
@@ -586,39 +591,50 @@ def validate_analysis(_ctx: RunContext[TradingAssistantDeps], value: TradingAnal
 
 # --- TOOLS ---
 # General tool usage reporting function
+# 更新 main.py 中的 report_tool_usage 函数
+
 async def report_tool_usage(_ctx: RunContext[TradingAssistantDeps], tool_name: str, **params):
     """Reports tool usage to the user."""
     if _ctx.deps.send_message_func:
-        # Build description
-        param_str = ", ".join([f"{k}={v}" for k, v in params.items() if v])
-        message = f"Using tool ({_ctx.deps.agent_name}): {tool_name}" + (f" ({param_str})" if param_str else "")
+        # 提取 text_content 用于消息展示
+        text_content = params.pop("text_content", None)
 
-        # Check if the function is awaitable (a coroutine function)
-        if _ctx.deps.send_message_func:
-            try:
-                # Try to call it as an awaitable
-                await _ctx.deps.send_message_func(
-                    _ctx.deps.request,
-                    {
-                        "id": f"tool-{_ctx.deps.agent_name}-{tool_name}-{uuid4()}",
-                        "sender": "agent",
-                        "text": message,
-                        "message_type": "tool_call",
-                    }
-                )
-            except TypeError:
-                # If it's not awaitable, call it directly
-                _ctx.deps.send_message_func(
-                    _ctx.deps.request,
-                    {
-                        "id": f"tool-{_ctx.deps.agent_name}-{tool_name}-{uuid4()}",
-                        "sender": "agent",
-                        "text": message,
-                        "message_type": "tool_call",
-                    }
-                )
+        # 构建参数描述字符串
+        param_str = ", ".join([f"{k}={v}" for k, v in params.items() if v and k != "text_content"])
+
+        # 优先使用 text_content 作为消息内容，如果没有则使用工具调用描述
+        message_text = text_content or f"Using tool ({_ctx.deps.agent_name}): {tool_name}" + (
+            f" ({param_str})" if param_str else "")
+
+        try:
+            # 添加返回工具调用的详细信息
+            message = {
+                "id": f"tool-{_ctx.deps.agent_name}-{tool_name}-{uuid4()}",
+                "sender": "agent",
+                "text": message_text,
+                "message_type": "tool_call",
+                "tool": {
+                    "name": tool_name,
+                    "params": params
+                }
+            }
+
+            # 尝试调用 send_message_func
+            await _ctx.deps.send_message_func(_ctx.deps.request, message)
+        except TypeError:
+            # 如果不是可等待的，直接调用
+            _ctx.deps.send_message_func(_ctx.deps.request, {
+                "id": f"tool-{_ctx.deps.agent_name}-{tool_name}-{uuid4()}",
+                "sender": "agent",
+                "text": message_text,
+                "message_type": "tool_call",
+                "tool": {
+                    "name": tool_name,
+                    "params": params
+                }
+            })
     else:
-        # Just log the tool usage if there's no message function
+        # 日志记录
         logging.info(f"Tool Usage: {tool_name} - {params}")
 
 
@@ -640,7 +656,9 @@ async def current_phase_complete(ctx: RunContext[TradingAssistantDeps],
     """
     await report_tool_usage(ctx, "current_phase_complete",
                             current_phase=current_phase,
-                            next_phase=next_phase)
+                            next_phase=next_phase,
+                            text_content=f"Transitioning from {current_phase} to {next_phase}"
+                            )
 
     phase_guidance = {
         "information_collection": "All required information collected. Proceed to token verification.",
@@ -665,7 +683,9 @@ async def discover_token_contract(ctx: RunContext[TradingAssistantDeps], token_s
     """
     Discover the contract address for a token on a specific blockchain using web search and database.
     """
-    await report_tool_usage(ctx, "discover_token_contract", token_symbol=token_symbol, blockchain=blockchain)
+    await report_tool_usage(ctx, "discover_token_contract", token_symbol=token_symbol, blockchain=blockchain,
+                            text_content=f"Discovering contract address for {token_symbol} on {blockchain}"
+                            )
 
     # Known tokens database with accurate addresses
     known_tokens = {
@@ -702,6 +722,11 @@ async def discover_token_contract(ctx: RunContext[TradingAssistantDeps], token_s
             ctx.token_contracts = {}
 
         ctx.token_contracts[f"{token_symbol}_{blockchain}"] = contract_address
+        logging.info(f"Contract address found for {token_symbol} on {blockchain}: {contract_address}")
+
+        await report_tool_usage(ctx, "discover_token_contract", token_symbol=token_symbol, blockchain=blockchain,
+                                text_content=f"Found contract address for {token_symbol} on {blockchain}"
+                                )
 
         return f"""
 CONTRACT FOUND:
@@ -716,6 +741,9 @@ The contract address has been stored for use in verification and security analys
     # If not in database, search the web with specific queries
     search_query = f"{token_symbol} token contract address on {blockchain} blockchain coingecko"
     search_result = await search_web(ctx, search_query)
+    logging.info(f"Web search result for {token_symbol} on {blockchain}: {search_result}")
+    await report_tool_usage(ctx, "discover_token_contract", token_symbol=token_symbol, blockchain=blockchain,
+                            text_content=f"Web search result for {token_symbol} on {blockchain}: {search_result}")
 
     # Try to extract the address using regex
     import re
@@ -732,6 +760,9 @@ The contract address has been stored for use in verification and security analys
             ctx.token_contracts = {}
 
         ctx.token_contracts[f"{token_symbol}_{blockchain}"] = contract_address
+        await report_tool_usage(ctx, "discover_token_contract", token_symbol=token_symbol, blockchain=blockchain,
+                                text_content=f"Found contract address for {token_symbol} on {blockchain}"
+                                )
 
         return f"""
 CONTRACT FOUND:
@@ -754,6 +785,9 @@ The contract address has been stored for use in verification and security analys
 
     for native, chains in native_tokens.items():
         if token_symbol == native and blockchain in chains:
+            await report_tool_usage(ctx, "discover_token_contract", token_symbol=token_symbol, blockchain=blockchain,
+                                    text_content=f"Found native token {token_symbol} on {blockchain}"
+                                    )
             return f"""
 NATIVE TOKEN:
 Token: {token_symbol}
@@ -764,6 +798,9 @@ Contract: Native (no contract address needed)
 """
 
     # If address not found, inform user
+    await report_tool_usage(ctx, "discover_token_contract", token_symbol=token_symbol, blockchain=blockchain,
+                            text_content=f"Contract address not found for {token_symbol} on {blockchain}"
+                            )
     return f"""
 CONTRACT NOT FOUND:
 Token: {token_symbol}
@@ -790,8 +827,9 @@ async def get_top5_tokens(ctx: RunContext[TradingAssistantDeps], blockchain: str
     Returns:
         Information about the top 5 tokens including symbols and contract addresses
     """
-    await report_tool_usage(ctx, "get_top5_tokens", blockchain=blockchain)
-    logging.info(f"Fetching top 5 tokens for blockchain: {blockchain}")
+    await report_tool_usage(ctx, "get_top5_tokens",
+                            blockchain=blockchain, text_content=f"Trying to Get top5 Tokens on {blockchain}"
+                            )
 
     # 规范化blockchain参数
     blockchain = blockchain.lower()
@@ -800,8 +838,14 @@ async def get_top5_tokens(ctx: RunContext[TradingAssistantDeps], blockchain: str
         if third_party_client:
             response = await third_party_client._get("top5_tokens")
             logging.info(f"Top 5 tokens API response: {response}")
+            await report_tool_usage(ctx, "get_top5_tokens", blockchain=blockchain,
+                                    text_content=f"Tokens founded: {[i for i in response]}"
+                                    )
 
             if "error" in response:
+                await report_tool_usage(ctx, "get_top5_tokens", blockchain=blockchain,
+                                        text_content=f"Error: {response.get('error')}"
+                                        )
                 return f"""
                 ERROR FETCHING TOP 5 TOKENS:
                 {response.get("error")}
@@ -820,7 +864,9 @@ async def get_top5_tokens(ctx: RunContext[TradingAssistantDeps], blockchain: str
 
                 # Format the response
                 token_list = "\n".join([f"- {token.upper()}: {address}" for token, address in tokens.items()])
-
+                await report_tool_usage(ctx, "get_top5_tokens", blockchain=blockchain,
+                                        text_content=f"Tokens founded: {token_list}"
+                                        )
                 return f"""
                 TOP 5 TOKENS ON {blockchain.upper()}:
                 {token_list}
@@ -833,6 +879,9 @@ async def get_top5_tokens(ctx: RunContext[TradingAssistantDeps], blockchain: str
                 3. Proceed with transactions for tokens that pass security checks
                 """
             else:
+                await report_tool_usage(ctx, "get_top5_tokens", blockchain=blockchain,
+                                        text_content=f"Unexpected API response format"
+                                        )
                 return """
                 ERROR FETCHING TOP 5 TOKENS:
                 Unexpected API response format.
@@ -848,6 +897,9 @@ async def get_top5_tokens(ctx: RunContext[TradingAssistantDeps], blockchain: str
                 "brett": "0x532f27101965dd16442e59d40670faf5ebb142e4",
                 "babyxbt": "0x00007ada018b227385f0f72929a18293049e0ef2"
             }
+            await report_tool_usage(ctx, "get_top5_tokens", blockchain=blockchain,
+                                    text_content=f"Mock Tokens founded: {mock_tokens}"
+                                    )
 
             # Store in context
             if not hasattr(ctx, 'top_tokens'):
@@ -870,6 +922,9 @@ async def get_top5_tokens(ctx: RunContext[TradingAssistantDeps], blockchain: str
             """
     except Exception as e:
         logging.error(f"Error in get_top5_tokens: {e}")
+        await report_tool_usage(ctx, "get_top5_tokens", blockchain=blockchain,
+                                text_content=f"Error while fetching top5 tokens: {str(e)}"
+                                )
         return f"""
         ERROR FETCHING TOP 5 TOKENS:
         An unexpected error occurred: {str(e)}
@@ -894,7 +949,11 @@ async def track_security_results(ctx: RunContext[TradingAssistantDeps],
 
     await report_tool_usage(ctx, "track_security_results",
                             token=token,
-                            blockchain=blockchain)
+                            blockchain=blockchain,
+                            security_score=security_score,
+                            notes=notes,
+                            text_content=f"Tracking security results for {token} on {blockchain}"
+                            )
 
     # Initialize security results storage
     if not hasattr(ctx, 'security_results'):
@@ -909,6 +968,13 @@ async def track_security_results(ctx: RunContext[TradingAssistantDeps],
         'security_score': security_score if security_score is not None else 5,  # Default moderate score
         'notes': notes
     }
+    await report_tool_usage(ctx, "track_security_results",
+                            token=token,
+                            blockchain=blockchain,
+                            security_score=security_score,
+                            notes=notes,
+                            text_content=f"Security results stored for {token} on {blockchain}"
+                            )
 
     # Count safe tokens
     safe_tokens = [details for details in ctx.security_results.values() if details['is_safe']]
@@ -952,6 +1018,13 @@ async def analyze_portfolio_allocation(ctx: RunContext[TradingAssistantDeps],
     tokens_list = [t.strip() for t in target_tokens.split(',')]
 
     # 计算均等分配
+    await report_tool_usage(ctx, "analyze_portfolio_allocation",
+                            total_amount=total_amount,
+                            source_token=source_token,
+                            target_tokens=target_tokens,
+                            blockchain=blockchain,
+                            text_content=f"Analyzing portfolio allocation for {len(tokens_list)} tokens"
+                            )
     percentage = 100.0 / len(tokens_list)
     allocations = [percentage] * len(tokens_list)
     amounts = [(total_amount * alloc / 100.0) for alloc in allocations]
@@ -979,6 +1052,14 @@ async def analyze_portfolio_allocation(ctx: RunContext[TradingAssistantDeps],
         for token, alloc, amt in zip(target_tokens, allocations, amounts)
     ])
 
+    await report_tool_usage(ctx, "analyze_portfolio_allocation",
+                            total_amount=total_amount,
+                            source_token=source_token,
+                            target_tokens=target_tokens,
+                            blockchain=blockchain,
+                            text_content=f"Portfolio allocation analysis complete"
+                            )
+
     return f"""
     PORTFOLIO ALLOCATION ANALYSIS:
     Total Investment: {total_amount} {source_token}
@@ -1003,10 +1084,14 @@ async def execute_portfolio_transactions(ctx: RunContext[TradingAssistantDeps]) 
     Executes all pending transactions in the portfolio allocation after security checks.
     Should be called AFTER analyzing all tokens in the portfolio.
     """
-    await report_tool_usage(ctx, "execute_portfolio_transactions")
+    await report_tool_usage(ctx, "execute_portfolio_transactions", text_content="Executing portfolio transactions"
+                            )
 
     # Check if we have a portfolio allocation
     if not hasattr(ctx, 'portfolio_allocation') or not ctx.portfolio_allocation:
+        await report_tool_usage(ctx, "execute_portfolio_transactions",
+                                text_content="No portfolio allocation found in context"
+                                )
         return """
         ERROR: No portfolio allocation found in context.
 
@@ -1018,6 +1103,9 @@ async def execute_portfolio_transactions(ctx: RunContext[TradingAssistantDeps]) 
 
     # Check if we have security flags for all tokens
     if not hasattr(ctx, 'security_flags') or not ctx.security_flags:
+        await report_tool_usage(ctx, "execute_portfolio_transactions",
+                                text_content="No security flags found in context"
+                                )
         return """
         ERROR: Security checks have not been performed on portfolio tokens.
 
@@ -1034,6 +1122,9 @@ async def execute_portfolio_transactions(ctx: RunContext[TradingAssistantDeps]) 
     results = []
     executed_count = 0
     skipped_count = 0
+    await report_tool_usage(ctx, "execute_portfolio_transactions",
+                            text_content=f"Executing {len(allocations)} transactions"
+                            )
 
     for allocation in allocations:
         token = allocation.get('token')
@@ -1058,22 +1149,32 @@ async def execute_portfolio_transactions(ctx: RunContext[TradingAssistantDeps]) 
                 if token_address:
                     whitelist_result = await update_whitelist(ctx, token_address, True)
 
+
+
                 # Execute the swap
                 swap_result = await approve_and_swap(ctx, source_token, token, amount)
 
-                results.append(f"✅ {token}: Successfully swapped {amount} {source_token}")
+                results.append(f"{token}: Transaction successful")
                 executed_count += 1
 
             except Exception as e:
+                await report_tool_usage(ctx, "execute_portfolio_transactions",
+                                        text_content=f"Error executing transaction for {token}: {str(e)}"
+                                        )
                 logging.error(f"Error executing transaction for {token}: {e}")
-                results.append(f"❌ {token}: Transaction failed - {str(e)}")
+                results.append(f"{token}: Transaction failed - Error executing transaction for {token}: {e}")
                 skipped_count += 1
         else:
-            results.append(f"⚠️ {token}: Skipped - Failed security checks")
+            await report_tool_usage(ctx, "execute_portfolio_transactions",
+                                    text_content=f"Skipping transaction for {token} due to security issues"
+                                    )
+            results.append(f"{token}: Skipped - Skipping transaction for {token} due to security issues")
             skipped_count += 1
 
     results_str = "\n".join(results)
-
+    await report_tool_usage(ctx, "execute_portfolio_transactions",
+                            text_content=f"Portfolio transactions complete: {executed_count} executed, {skipped_count} skipped"
+                            )
     return f"""
     PORTFOLIO TRANSACTIONS COMPLETE:
     Successfully executed: {executed_count}/{len(allocations)} transactions
@@ -1091,6 +1192,8 @@ async def execute_portfolio_transactions(ctx: RunContext[TradingAssistantDeps]) 
     2. For any skipped tokens, consider alternative options
     3. Your portfolio is now active on {blockchain}
     """
+
+
 @trading_agent.tool()
 async def fetch_token_information(
         ctx: RunContext[TradingAssistantDeps], token_symbol: str, blockchain: str
@@ -1099,13 +1202,18 @@ async def fetch_token_information(
     Fetches information about a specific token on a specific blockchain.
     Should be called AFTER discover_token_contract to use the correct address.
     """
-    await report_tool_usage(ctx, "fetch_token_information", token_symbol=token_symbol, blockchain=blockchain)
+    await report_tool_usage(ctx, "fetch_token_information", token_symbol=token_symbol, blockchain=blockchain,
+                            text_content=f"Fetching information for {token_symbol} on {blockchain}"
+                            )
     logging.info(f"Fetching information for token {token_symbol} on {blockchain}")
 
     # Get chain_index from the mapping
     blockchain_lower = blockchain.lower()
     chain_index = chain_index_map.get(blockchain_lower)
     if chain_index is None:
+        await report_tool_usage(ctx, "fetch_token_information", token_symbol=token_symbol, blockchain=blockchain,
+                                text_content=f"Invalid blockchain: {blockchain}"
+                                )
         return f"TOKEN VERIFICATION FAILED: The blockchain '{blockchain}' is not recognized."
 
     # Get the contract address (either from context or try to discover it)
@@ -1116,15 +1224,24 @@ async def fetch_token_information(
     else:
         # Try to discover it directly
         logging.info(f"No stored address found, trying to discover {token_symbol} on {blockchain}")
+        await report_tool_usage(ctx, "fetch_token_information", token_symbol=token_symbol, blockchain=blockchain,
+                                text_content=f"No stored address found, Discovering contract address for {token_symbol} on {blockchain}"
+                                )
         discovery_result = await discover_token_contract(ctx, token_symbol, blockchain)
 
         # Try to extract the address from the discovery result
         if "CONTRACT FOUND" in discovery_result and hasattr(ctx, 'token_contracts'):
             token_address = ctx.token_contracts.get(f"{token_symbol.upper()}_{blockchain_lower}")
             logging.info(f"Discovered contract address: {token_address}")
+            await report_tool_usage(ctx, "fetch_token_information", token_symbol=token_symbol, blockchain=blockchain,
+                                    text_content=f"Discovered contract address: {token_address}"
+                                    )
 
     # Handle native tokens
     if token_address == "native" or (token_symbol.upper() in ["ETH", "BTC", "MATIC", "AVAX"] and not token_address):
+        await report_tool_usage(ctx, "fetch_token_information", token_symbol=token_symbol, blockchain=blockchain,
+                                text_content=f"Native token found for {token_symbol} on {blockchain}"
+                                )
         return f"""
 TOKEN VERIFICATION RESULT:
 Token: {token_symbol}
@@ -1138,6 +1255,9 @@ Proceed to security analysis.
 
     # If we still don't have an address, return error
     if not token_address:
+        await report_tool_usage(ctx, "fetch_token_information", token_symbol=token_symbol, blockchain=blockchain,
+                                text_content=f"Contract address not found for {token_symbol} on {blockchain}"
+                                )
         return f"""
 TOKEN VERIFICATION FAILED:
 Token: {token_symbol}
@@ -1152,10 +1272,17 @@ Could not determine a contract address. Please use discover_token_contract first
         if okx_client:
             logging.info(f"Calling OKX API with chain_index={chain_index}, token_address={token_address}")
             token_info = await okx_client.get_token_detail(chain_index=chain_index, token_address=token_address)
+
             logging.info(f"OKX API response: {json.dumps(token_info)}")
 
             if token_info and "data" in token_info and isinstance(token_info['data'], list) and token_info['data']:
                 token_detail = token_info['data'][0]
+                text_detail = f"symbol {token_detail.get('symbol')}, name {token_detail.get('name')}, " \
+                                f"chain Name {token_detail.get('chainName')}, marketCap {token_detail.get('marketCap')}"
+
+                await report_tool_usage(ctx, "fetch_token_information", token_symbol=token_symbol, blockchain=blockchain,
+                                        text_content=f"Token information found: {text_detail}"
+                                        )
                 return f"""
 TOKEN VERIFICATION RESULT:
 Token: {token_symbol}
@@ -1170,6 +1297,9 @@ Proceed to security analysis.
 """
             else:
                 # If OKX doesn't have data, try a simple "healthy response" approach
+                await report_tool_usage(ctx, "fetch_token_information", token_symbol=token_symbol, blockchain=blockchain,
+                                        text_content=f"Token information not found in web server response"
+                                        )
                 return f"""
 TOKEN VERIFICATION RESULT:
 Token: {token_symbol}
@@ -1181,6 +1311,9 @@ While detailed verification couldn't be completed, the token appears to exist on
 Proceed with caution to security analysis.
 """
         else:
+            await report_tool_usage(ctx, "fetch_token_information", token_symbol=token_symbol, blockchain=blockchain,
+                                    text_content=f"Client unavailable, trying to use another way"
+                                    )
             return f"""
 TOKEN VERIFICATION INCOMPLETE:
 Token: {token_symbol}
@@ -1192,6 +1325,9 @@ OKX client unavailable. Using provided contract address for further analysis.
 Proceed with caution to security analysis.
 """
     except Exception as e:
+        await report_tool_usage(ctx, "fetch_token_information", token_symbol=token_symbol, blockchain=blockchain,
+                                text_content=f"Error fetching token information: {str(e)}"
+                                )
         logging.error(f"Error fetching token information: {e}")
         return f"""
 TOKEN VERIFICATION ERROR:
@@ -1210,7 +1346,8 @@ async def think_and_plan(ctx: RunContext[TradingAssistantDeps], user_request: st
     """
     Think deeply about the user's request and create a detailed execution plan.
     """
-    await report_tool_usage(ctx, "think_and_plan", user_request=user_request[:50] + "...")
+    await report_tool_usage(ctx, "think_and_plan", user_request=user_request[:50] + "...",
+                            text_content=f"Thinking deeply about the user's request: {user_request[:50] + '...' if len(user_request) > 50 else user_request}")
 
     # Store original request for future reference
     if not hasattr(ctx, 'original_request'):
@@ -1225,6 +1362,9 @@ async def think_and_plan(ctx: RunContext[TradingAssistantDeps], user_request: st
 
     # This tool doesn't need implementation logic as the AI will do the thinking
     if is_portfolio_request:
+        await report_tool_usage(ctx, "think_and_plan", user_request=user_request[:50] + "...",
+                                text_content=f"Portfolio request detected: {user_request[:50] + '...' if len(user_request) > 50 else user_request}"
+                                )
         return f"""
         PORTFOLIO EXECUTION PLAN FOR: "{user_request}"
 
@@ -1247,6 +1387,9 @@ async def think_and_plan(ctx: RunContext[TradingAssistantDeps], user_request: st
         - Proceed with transactions after verifying token existence
         """
     else:
+        await report_tool_usage(ctx, "think_and_plan", user_request=user_request[:50] + "...",
+                                text_content=f"Standard request detected: {user_request[:50] + '...' if len(user_request) > 50 else user_request}"
+                                )
         return f"""
         DETAILED EXECUTION PLAN FOR: "{user_request}"
 
@@ -1266,29 +1409,39 @@ async def think_and_plan(ctx: RunContext[TradingAssistantDeps], user_request: st
 
         Be flexible based on the actual request - don't follow a fixed template.
         """
+
+
 @trading_agent.tool()
 async def store_transaction_context(ctx: RunContext[TradingAssistantDeps],
-                                   source_token: str,
-                                   target_token: str,
-                                   blockchain: str,
-                                   amount: float = None,
-                                   source_address: str = None,
-                                   target_address: str = None) -> str:
+                                    source_token: str,
+                                    target_token: str,
+                                    blockchain: str,
+                                    amount: float = None,
+                                    source_address: str = None,
+                                    target_address: str = None) -> str:
     """
     Stores the current transaction context for later reference.
     """
     await report_tool_usage(ctx, "store_transaction_context",
-                           source_token=source_token,
-                           target_token=target_token,
-                           blockchain=blockchain,
-                           amount=amount)
+                            source_token=source_token,
+                            target_token=target_token,
+                            blockchain=blockchain,
+                            amount=amount,
+                            text_content=f"Storing transaction context for {source_token} to {target_token} on {blockchain}"
+                            )
 
     # 在此处添加区块链首选项保护
-    initial_blockchain = blockchain
     if hasattr(ctx, 'custom_data') and ctx.custom_data.get("blockchain"):
         # 如果用户已经指定了区块链并且不同，则记录警告
         if ctx.custom_data.get("blockchain").lower() != blockchain.lower():
             logging.warning(f"Blockchain preference changing from {ctx.custom_data.get('blockchain')} to {blockchain}")
+            await report_tool_usage(ctx, "store_transaction_context",
+                                    source_token=source_token,
+                                    target_token=target_token,
+                                    blockchain=blockchain,
+                                    amount=amount,
+                                    text_content=f"Blockchain preference changing from {ctx.custom_data.get('blockchain')} to {blockchain}"
+                                    )
             # 为了额外的安全性，您可以添加：
             blockchain = ctx.custom_data.get("blockchain")  # 保留原始选择
 
@@ -1319,6 +1472,13 @@ async def store_transaction_context(ctx: RunContext[TradingAssistantDeps],
 
     # 记录存储的值以便调试
     logging.info(f"Stored transaction context: {ctx.custom_data}")
+    await report_tool_usage(ctx, "store_transaction_context",
+                            source_token=source_token,
+                            target_token=target_token,
+                            blockchain=blockchain,
+                            amount=amount,
+                            text_content=f"Transaction context stored for {source_token} to {target_token} on {blockchain}"
+                            )
 
     return f"""
     TRANSACTION CONTEXT STORED:
@@ -1355,7 +1515,9 @@ async def analyze_contract_security_with_api(
                             source_token=source_token,
                             target_token=target_token,
                             blockchain=blockchain,
-                            amount=amount)
+                            amount=amount,
+                            text_content=f"Analyzing security for {target_token} on {blockchain}"
+                            )
 
     # Use stored context if available
     if hasattr(ctx, 'custom_data'):
@@ -1382,16 +1544,47 @@ async def analyze_contract_security_with_api(
                 amount=amount
             )
             logging.info(f"Security API response: {result}")
+            security_text = ""
+            for key, value in result.items():
+                security_text += f"Token: {key}\n"
+                for k, v in value.items():
+                    if k == "security":
+                        security_text += f"Security:\n"
+                        for k1, v1 in v.items():
+                            if k1 == "Risks":
+                                security_text += " - Risks:\n"
+                                for k2, v2 in v1.items():
+                                    security_text += f"   - {k2}: {v2}\n"
+                            elif k1 == "Potential Growth":
+                                security_text += " - Potential Growth:\n"
+                                for k2, v2 in v1.items():
+                                    security_text += f"   - {k2}: {v2}\n"
+                            elif k1 == "Conclusion":
+                                security_text += " - Conclusion:\n"
+                                for k2, v2 in v1.items():
+                                    security_text += f"   - {k2}: {v2}\n"
+
+                    else:
+                        # if v is int or float, round to 8 decimal places
+                        try:
+                            v = float(v)
+                        except:
+                            pass
+                        if isinstance(v, (int, float)):
+                            v = round(v, 8)
+                        security_text += f"{k}: {v}\n"
+            await report_tool_usage(ctx, "analyze_contract_security_with_api",
+                                    source_token=source_token,
+                                    target_token=target_token,
+                                    blockchain=blockchain,
+                                    amount=amount,
+                                    text_content=f"Security analysis result:\n{security_text}"
+                                    )
 
             # Handle API errors more gracefully
             if "error" in result or "detail" in result:
                 error_msg = result.get("error") or str(result.get("detail"))
                 logging.error(f"Security API error: {error_msg}")
-
-                # For portfolio building, let's be more lenient with API errors
-                # Set a default "moderate" security score instead of failing completely
-                security_score = 5
-                risk_level = "MEDIUM"
 
                 # Initialize security flags if needed
                 if not hasattr(ctx, 'security_flags'):
@@ -1400,6 +1593,13 @@ async def analyze_contract_security_with_api(
                 # Mark as safe for portfolio building purposes (with warning)
                 key = f"{source_token}_{target_token}_{blockchain}"
                 ctx.security_flags[key] = True  # Allow to proceed but with warning
+                await report_tool_usage(ctx, "analyze_contract_security_with_api",
+                                        source_token=source_token,
+                                        target_token=target_token,
+                                        blockchain=blockchain,
+                                        amount=amount,
+                                        text_content=f"Security analysis error: {error_msg}"
+                                        )
 
                 return f"""
                 SECURITY ANALYSIS PARTIAL:
@@ -1499,6 +1699,13 @@ async def analyze_contract_security_with_api(
 
             key = f"{source_token}_{target_token}_{blockchain}"
             ctx.security_flags[key] = True  # Allow to proceed with warning
+            await report_tool_usage(ctx, "analyze_contract_security_with_api",
+                                    source_token=source_token,
+                                    target_token=target_token,
+                                    blockchain=blockchain,
+                                    amount=amount,
+                                    text_content=f"Security analysis error: {str(e)}"
+                                    )
 
             return f"""
                 SECURITY ANALYSIS EXCEPTION:
@@ -1518,6 +1725,13 @@ async def analyze_contract_security_with_api(
 
         key = f"{source_token}_{target_token}_{blockchain}"
         ctx.security_flags[key] = True  # Allow to proceed with warning
+        await report_tool_usage(ctx, "analyze_contract_security_with_api",
+                                source_token=source_token,
+                                target_token=target_token,
+                                blockchain=blockchain,
+                                amount=amount,
+                                text_content=f"Security API NOT AVAILABLE"
+                                )
 
         return """
             SECURITY API NOT AVAILABLE:
@@ -1530,10 +1744,14 @@ async def analyze_contract_security_with_api(
             2. Will include warning in final recommendation.
             3. Continue with remaining token analysis.
             """
+
+
 @trading_agent.tool()
 async def search_web(ctx: RunContext[TradingAssistantDeps], query: str) -> str:
     """Uses Google Search to find information about tokens, blockchains, or other crypto topics."""
-    await report_tool_usage(ctx, "search_web", query=query)
+    await report_tool_usage(
+        ctx, "search_web", query=query, text_content=f"Searching web..."
+    )
     logging.info(f"Searching web for: {query}")
 
     # Initialize search results storage if needed
@@ -1611,9 +1829,13 @@ NOTE: These results were previously retrieved. Using cached data for efficiency.
 
             # Cache the results
             ctx.search_results[query] = result_text
+            await report_tool_usage(ctx, "search_web", query=query, text_content="Web Searching Done."
+                                    )
             return result_text
         except Exception as e:
             logging.error(f"Error searching with Gemini: {e}")
+            await report_tool_usage(ctx, "search_web", query=query, text_content=f"SEARCH ERROR: {str(e)}"
+                                    )
             return f"SEARCH ERROR: {str(e)}"
     else:
         return "SEARCH ERROR: Gemini API key not configured for search functionality."
@@ -1628,7 +1850,9 @@ async def update_whitelist(ctx: RunContext[TradingAssistantDeps], token_address:
         token_address: The contract address of the token to whitelist
         add: True to add to whitelist, False to remove
     """
-    await report_tool_usage(ctx, "update_whitelist", token_address=token_address, add=add)
+    await report_tool_usage(ctx, "update_whitelist", token_address=token_address, add=add,
+                            text_content=f"{'Adding' if add else 'Removing'} {token_address} from whitelist")
+
 
     # 检查安全标志
     if hasattr(ctx, 'custom_data'):
@@ -1642,6 +1866,9 @@ async def update_whitelist(ctx: RunContext[TradingAssistantDeps], token_address:
             is_safe = ctx.security_flags.get(key, False)
 
             if not is_safe:
+                await report_tool_usage(ctx, "update_whitelist",
+                                        text_content=f"Security checks failed for {token_address}. Whitelist update blocked.")
+
                 return """
                 WHITELIST UPDATE BLOCKED:
                 Security checks failed for this transaction.
@@ -1655,7 +1882,8 @@ async def update_whitelist(ctx: RunContext[TradingAssistantDeps], token_address:
     logging.info(f"Simulating {'adding' if add else 'removing'} address {token_address} to/from whitelist.")
 
     result = f"Address {token_address} has been {'added to' if add else 'removed from'} the whitelist."
-
+    await report_tool_usage(ctx, "update_whitelist", token_address=token_address, add=add,
+                            text_content=result)
     return f"""
     WHITELIST UPDATE COMPLETE:
     {result}
@@ -1756,6 +1984,13 @@ async def approve_and_swap(ctx: RunContext[TradingAssistantDeps],
 
     # 确保amount不为None
     if amount is None:
+        await report_tool_usage(ctx, "approve_and_swap",
+                                from_token=from_token,
+                                to_token=to_token,
+                                amount=amount,
+                                slippage=slippage,
+                                text_content=f"{from_token} to {to_token} swap blocked due to missing amount."
+                                )
         return """
         TRANSACTION ERROR:
         Missing amount parameter. Cannot execute trade without specified amount.
@@ -1771,6 +2006,13 @@ async def approve_and_swap(ctx: RunContext[TradingAssistantDeps],
         is_safe = ctx.security_flags.get(key, False)
 
         if not is_safe:
+            await report_tool_usage(ctx, "approve_and_swap",
+                                    from_token=from_token,
+                                    to_token=to_token,
+                                    amount=amount,
+                                    slippage=slippage,
+                                    text_content=f"{from_token} to {to_token} swap blocked due to security concerns."
+                                    )
             return """
             TRANSACTION BLOCKED:
             Security checks failed for this transaction.
@@ -1785,7 +2027,9 @@ async def approve_and_swap(ctx: RunContext[TradingAssistantDeps],
                             from_token=from_token,
                             to_token=to_token,
                             amount=amount,
-                            slippage=slippage)
+                            slippage=slippage,
+                            text_content=f"Simulating approval and swap of {amount} {from_token} to {to_token} with slippage {slippage}."
+                            )
 
     logging.info(f"Simulating approval and swap of {amount} {from_token} to {to_token} with slippage {slippage}.")
 
@@ -1828,7 +2072,6 @@ def get_chain_data(ctx: RunContext[TradingAssistantDeps]) -> str:
     base_info = ""
     if base_chain:
         base_info = f"\nHACKATHON FOCUS - Base Chain:\nName: {base_chain['name']}, ShortName: {base_chain['shortName']}, ChainIndex: {base_chain['chainIndex']}"
-
     return f"""
 AVAILABLE BLOCKCHAINS:
 {chain_summary}

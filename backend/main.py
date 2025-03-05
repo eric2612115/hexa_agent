@@ -11,6 +11,8 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any, Callable, Union
 from uuid import uuid4
 
+from agents.dex_api_client.public_data import get_binance_tickers
+from backend.message_structure import MessageStructure
 import motor.motor_asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -207,13 +209,7 @@ class ConnectionManager:
 
     async def update_status(self, wallet_address: str, status: str):
         """Update and send a status message"""
-        status_message = {
-            "id": f"status-{uuid4()}",
-            "sender": "agent",
-            "text": status,
-            "message_type": "status",
-            "timestamp": datetime.now().isoformat()
-        }
+        status_message = MessageStructure.format_status(status)
 
         await self.send_message(wallet_address, status_message)
         await save_message(wallet_address, status_message)
@@ -363,12 +359,10 @@ async def add_token_to_whitelist(multisig_address: str, token_address: str) -> b
 
 async def clarify_with_user(wallet_address: str, question: str) -> None:
     """Send a clarification question to the user and save the message"""
-    clarification_message = Message(
-        id=str(uuid4()),
-        sender="agent",
-        text=question,
-        message_type="clarification",
-    ).dict()
+    clarification_message = MessageStructure.format_ai_response({
+        "recommendation": question,
+        "message_type": "clarification"
+    })
     await save_message(wallet_address, clarification_message)
     await manager.send_message(wallet_address, clarification_message)
 
@@ -427,12 +421,10 @@ async def websocket_endpoint(websocket: WebSocket, address: str):
         user = await create_user(wallet_address)
 
     try:
-        welcome_message = Message(
-            id=str(uuid4()),
-            sender="agent",
-            text="Hello! I'm your AI Trading Assistant. How can I help you today?",
-            message_type="normal"
-        ).dict()
+        # Use MessageStructure for welcome message
+        welcome_message = MessageStructure.format_ai_response({
+            "recommendation": "Hello! I'm your AI Trading Assistant. How can I help you today?"
+        })
         await save_message(wallet_address, welcome_message)
         await manager.send_message(wallet_address, welcome_message)
 
@@ -446,24 +438,24 @@ async def websocket_endpoint(websocket: WebSocket, address: str):
                     raise ValueError("Missing 'query' field")
 
             except (json.JSONDecodeError, ValueError) as e:
-                await manager.send_message(wallet_address, {"error": str(e)})
+                await manager.send_message(wallet_address, MessageStructure.format_error(str(e)))
                 continue
 
-            user_message = Message(
-                id=str(uuid4()),
-                sender="user",
-                text=query,
-                message_type="normal"
-            ).dict()
+            # Format user message
+            user_message = {
+                "id": str(uuid4()),
+                "sender": "user",
+                "text": query,
+                "message_type": "normal",
+                "timestamp": datetime.now().isoformat()
+            }
 
             await save_message(wallet_address, user_message)
 
             if manager.is_agent_busy(wallet_address):
-                await manager.send_message(wallet_address, {
-                    "error": "Agent is busy. Please wait.",
-                    "id": str(uuid4()),
-                    "timestamp": datetime.now().isoformat()
-                })
+                await manager.send_message(wallet_address, MessageStructure.format_error(
+                    "Agent is busy. Please wait."
+                ))
                 continue
 
             asyncio.create_task(process_and_reply(wallet_address, query))
@@ -474,11 +466,7 @@ async def websocket_endpoint(websocket: WebSocket, address: str):
         logger.exception(f"Error in WebSocket connection: {e}")
         await manager.send_message(
             wallet_address,
-            {
-                "error": f"An unexpected error occurred: {str(e)}",
-                "id": str(uuid4()),
-                "timestamp": datetime.now().isoformat(),
-            },
+            MessageStructure.format_error(f"An unexpected error occurred: {str(e)}")
         )
         manager.disconnect(wallet_address)
 
@@ -490,12 +478,7 @@ async def process_and_reply(wallet_address: str, query: str):
         logger.info(f"Result from process_message: {result}")
 
         if "error" in result:
-            error_message = Message(
-                id=str(uuid4()),
-                sender="agent",
-                text=result["error"],
-                message_type="error"
-            ).dict()
+            error_message = MessageStructure.format_error(result["error"])
             await save_message(wallet_address, error_message)
             await manager.send_message(wallet_address, error_message)
             return
@@ -503,53 +486,44 @@ async def process_and_reply(wallet_address: str, query: str):
         analysis_result = result["result"]
         logger.info(f"Analysis result: {analysis_result}")
 
-        # Determine action type based on safe_to_execute and thinking_steps
-        agent_message = Message(
-            id=str(uuid4()),
-            sender="agent",
-            text=analysis_result["recommendation"],
-            message_type="normal"
-        )
+        # Handle AgentRunResult object correctly - extract the data attribute which contains TradingAnalysis
+        if hasattr(analysis_result, 'data'):
+            trading_analysis = analysis_result.data
+        else:
+            # If it's already a TradingAnalysis object (or dict)
+            trading_analysis = analysis_result
 
-        if "safe_to_execute" in analysis_result:
-            if analysis_result["safe_to_execute"]:
+        # Now access attributes on the TradingAnalysis object (not dict subscripting)
+        agent_message = MessageStructure.format_ai_response(trading_analysis)
+
+        # Set action based on the safe_to_execute attribute
+        if hasattr(trading_analysis, 'safe_to_execute'):
+            safe_to_execute = trading_analysis.safe_to_execute
+            if safe_to_execute:
                 # Check if there are any "clarification" type messages in thinking_steps
-                needs_clarification = any(
-                    step.get("message_type") == "clarification"
-                    for step in analysis_result.get("thinking_steps", [])
-                )
-                if needs_clarification:
-                    # If clarification is needed, don't proceed with further actions
-                    return
+                needs_clarification = False
+                if hasattr(trading_analysis, 'thinking_steps'):
+                    needs_clarification = any(
+                        getattr(step, 'message_type', '') == "clarification"
+                        for step in trading_analysis.thinking_steps
+                    )
 
-                agent_message.action = {
-                    "type": "confirm",
-                    "text": "Confirm Transaction",
-                    "data": analysis_result,
-                }
+                if not needs_clarification:
+                    # Execute transaction if safe
+                    await handle_ai_transaction(wallet_address, {
+                        "safe_to_execute": safe_to_execute,
+                        "source_token": getattr(trading_analysis.source_token, 'symbol', 'UNKNOWN'),
+                        "target_token": getattr(trading_analysis.target_token, 'symbol', 'UNKNOWN'),
+                        "thinking_steps": [step.__dict__ if hasattr(step, '__dict__') else step
+                                           for step in getattr(trading_analysis, 'thinking_steps', [])]
+                    })
 
-                # Execute transaction
-                await handle_ai_transaction(wallet_address, analysis_result)
-            else:
-                agent_message.action = {
-                    "type": "info",
-                    "text": "View Details",
-                    "data": analysis_result,
-                }
-
-        agent_message_dict = agent_message.dict()
-        logger.info(f"Agent message: {agent_message_dict}")
-        await save_message(wallet_address, agent_message_dict)
-        await manager.send_message(wallet_address, agent_message_dict)
+        await save_message(wallet_address, agent_message)
+        await manager.send_message(wallet_address, agent_message)
 
     except Exception as e:
         logger.exception(f"Error processing message: {e}")
-        error_message = Message(
-            id=str(uuid4()),
-            sender="agent",
-            text=f"An error occurred: {str(e)}",
-            message_type="error",
-        ).dict()
+        error_message = MessageStructure.format_error(f"An error occurred: {str(e)}")
         await save_message(wallet_address, error_message)
         await manager.send_message(wallet_address, error_message)
 
@@ -559,20 +533,17 @@ async def handle_ai_transaction(wallet_address: str, analysis_result: dict):
     logger.info(f"Handling AI transaction with: {analysis_result}")
     user = await get_user(wallet_address)
     if not user or not user.get("multisig_address"):
-        error_message = Message(
-            id=str(uuid4()),
-            sender="agent",
-            text="Multisig wallet not deployed. Please deploy a multisig wallet first.",
-            message_type="error",
-        ).dict()
+        error_message = MessageStructure.format_error(
+            "Multisig wallet not deployed. Please deploy a multisig wallet first."
+        )
         await save_message(wallet_address, error_message)
         await manager.send_message(wallet_address, error_message)
         return
 
     try:
         # Get token information from analysis result
-        source_token = analysis_result["source_token"]
-        target_token = analysis_result["target_token"]
+        source_token = analysis_result.get("source_token", "Unknown")
+        target_token = analysis_result.get("target_token", "Unknown")
 
         # Send status update
         await manager.update_status(wallet_address, "AI is preparing to execute the transaction...")
@@ -581,23 +552,19 @@ async def handle_ai_transaction(wallet_address: str, analysis_result: dict):
         await asyncio.sleep(1)  # Simulate delay
 
         # 1. AI approves transaction (message)
-        approval_message = Message(
-            id=str(uuid4()),
-            sender="agent",
-            text=f"I'm approving the exchange of {source_token['symbol']} for {target_token['symbol']}...",
-            message_type="transaction",
-        ).dict()
+        approval_message = MessageStructure.format_transaction(
+            text=f"I'm approving the exchange of {source_token} for {target_token}...",
+            status="pending"
+        )
         await save_message(wallet_address, approval_message)
         await manager.send_message(wallet_address, approval_message)
         await asyncio.sleep(1.5)
 
         # 2. AI signs transaction (message)
-        signing_message = Message(
-            id=str(uuid4()),
-            sender="agent",
+        signing_message = MessageStructure.format_transaction(
             text=f"Now signing the transaction with my multisig key...",
-            message_type="transaction",
-        ).dict()
+            status="pending"
+        )
         await save_message(wallet_address, signing_message)
         await manager.send_message(wallet_address, signing_message)
         await asyncio.sleep(1.5)
@@ -605,8 +572,10 @@ async def handle_ai_transaction(wallet_address: str, analysis_result: dict):
         # 3. Extract tx_hash from thinking_steps
         tx_hash = None
         for step in analysis_result.get('thinking_steps', []):
-            if step.get('question') == 'Approve transaction details':
-                tx_hash = step.get('answer', {}).get('tx_hash')
+            if isinstance(step, dict) and step.get('question') == 'Approve transaction details':
+                answer = step.get('answer', {})
+                if isinstance(answer, dict):
+                    tx_hash = answer.get('tx_hash')
                 break
 
         if not tx_hash:
@@ -615,27 +584,20 @@ async def handle_ai_transaction(wallet_address: str, analysis_result: dict):
             tx_hash = "0x" + uuid4().hex
 
         # 4. Simulate sending transaction to blockchain
-        submitting_message = Message(
-            id=str(uuid4()),
-            sender="agent",
+        submitting_message = MessageStructure.format_transaction(
             text=f"Transaction submitted to blockchain. Transaction hash: {tx_hash}",
-            message_type="transaction",
+            status="completed",
             action={
                 "type": "submitted",
                 "tx_hash": tx_hash
             }
-        ).dict()
+        )
         await save_message(wallet_address, submitting_message)
         await manager.send_message(wallet_address, submitting_message)
 
     except Exception as e:
         logger.exception(f"Error during AI transaction processing: {e}")
-        error_message = Message(
-            id=str(uuid4()),
-            sender="agent",
-            text=f"Transaction processing failed: {str(e)}",
-            message_type="error",
-        ).dict()
+        error_message = MessageStructure.format_error(f"Transaction processing failed: {str(e)}")
         await save_message(wallet_address, error_message)
         await manager.send_message(wallet_address, error_message)
 
@@ -713,11 +675,9 @@ async def user_signature(
     logger.info(f"Received user {wallet_address} signature for transaction {tx_hash}")
 
     # Create transaction completion message
-    completion_message = Message(
-        id=str(uuid4()),
-        sender="system",
+    completion_message = MessageStructure.format_transaction(
         text="Transaction successfully completed! Multisig transaction submitted to blockchain.",
-        message_type="transaction",
+        status="completed",
         action={
             "type": "completed",
             "text": "Transaction completed",
@@ -726,8 +686,8 @@ async def user_signature(
                 "user_signature": user_signature,
                 "status": "confirmed",
             },
-        },
-    ).dict()
+        }
+    )
 
     await save_message(wallet_address, completion_message)
 
@@ -752,11 +712,9 @@ async def user_reject_transaction(
     wallet_address = wallet_address.lower()
     logger.info(f"User {wallet_address} rejected transaction {tx_hash}: {reason}")
 
-    rejection_message = Message(
-        id=str(uuid4()),
-        sender="system",
+    rejection_message = MessageStructure.format_transaction(
         text=f"Transaction rejected: {reason}",
-        message_type="transaction",
+        status="error",
         action={
             "type": "rejected",
             "text": "Transaction rejected",
@@ -765,7 +723,7 @@ async def user_reject_transaction(
                 "reason": reason
             }
         }
-    ).dict()
+    )
 
     await save_message(wallet_address, rejection_message)
 
@@ -791,6 +749,24 @@ async def create_indexes():
         logger.info("API clients initialized successfully")
     except Exception as e:
         logger.error(f"Error creating database indexes: {e}")
+
+@app.get("/api/public-data/tickers")
+async def get_tickers():
+    """Fetch ticker data for multiple symbols from the Binance API."""
+    # Fetch data from Binance API
+    tickers = await get_binance_tickers([
+        "BTCUSDT", "ETHUSDT", "SOLUSDT"
+    ])
+    return {"tickers": tickers}
+
+# private data
+@app.get("/wallet-balance")
+async def get_wallet_balance(wallet_address: str, chain_id: str=None):
+    """Get wallet balance"""
+    return {"wallet_address": wallet_address, "balance": 1000.0}
+
+
+# @app.post("/wallet-transfer")
 
 
 # --- Health check endpoint ---
