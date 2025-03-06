@@ -39,7 +39,7 @@ class OkxWeb3Client:
         }
     }
 
-    SUPPORT_CHAINS_IDS = ["1", "56", "137", "8453", "42161", "10", " 43114", "250"]
+    SUPPORT_CHAINS_IDS = ["1", "56", "137", "8453", "42161", "10", "43114", "250"]
 
     def __init__(self, project_id: str, api_key: str, api_secret: str, api_passphrase: str):
         self.logger = logging.getLogger(__name__)
