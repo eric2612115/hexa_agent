@@ -70,7 +70,6 @@ print(f"MongoDB URL: {str(MONGODB_URL)[:10]}...{str(MONGODB_URL)[5:]}")
 DATABASE_NAME = os.getenv("DATABASE_NAME", "trading_assistant")
 
 print(f"Using model: {MODEL} in {LOCATION}")
-print(f"MongoDB URL: {MONGODB_URL}, Database: {DATABASE_NAME}")
 
 # Import your trading agent classes and tools
 from agents.trade_bot_agent import (
