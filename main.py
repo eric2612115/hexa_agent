@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # main.py - Integrated backend with new trading agent
 
 import asyncio
@@ -6,15 +5,28 @@ import json
 import logging
 import os
 import sys
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Callable, Union
 from uuid import uuid4
 
+# --- FIX: Add project root to PYTHONPATH ---
+# Get the absolute path to the project root directory
+# project_root = os.path.dirname(os.path.abspath(__file__))
+# Add the project root to sys.path
+# sys.path.insert(0, project_root)
+# --- CORRECT Path Fix ---
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, project_root)
+# --- END Path Fix ---
+# os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
+from contextlib import asynccontextmanager
 from agents.dex_api_client.public_data import get_binance_tickers
 from backend.message_structure import MessageStructure
 import motor.motor_asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
@@ -50,36 +62,96 @@ OKX_WEB3_PROJECT_PASSWRD = os.getenv("OKX_WEB3_PROJECT_PASSWRD")
 
 # MongoDB configuration
 MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
+print(f"MongoDB URL: {str(MONGODB_URL)[:10]}...{str(MONGODB_URL)[5:]}")
 DATABASE_NAME = os.getenv("DATABASE_NAME", "trading_assistant")
 
 print(f"Using model: {MODEL} in {LOCATION}")
 print(f"MongoDB URL: {MONGODB_URL}, Database: {DATABASE_NAME}")
 
 # Import your trading agent classes and tools
-try:
-    from agents.trading_assistant import (
-        TradingAssistantDeps, trading_agent, TokenInfo, TradingAnalysis, ThinkingStep,
-        initialize_clients, run_trading_analysis
+from agents.trade_bot_agent import (
+    TradingAssistantDeps, trading_agent, TokenInfo, TradingAnalysis, ThinkingStep, okx_client, third_party_client
+)
+from agents.dex_api_client.okx_web3_client import OkxWeb3Client
+from agents.dex_api_client.third_client import ThirdPartyClient
+
+
+# Define this since we're importing from the new file
+async def initialize_clients():
+    from agents.trade_bot_agent import initialize_clients as init
+    await init()
+
+
+# Define run_trading_analysis if not present in the new agent
+async def run_trading_analysis(query, deps):
+    return await trading_agent.run(query, deps=deps)
+
+
+okx_client_server: OkxWeb3Client = None
+third_party_client_server: ThirdPartyClient = None
+
+
+# --- Initialize database indexes ---
+# @app.on_event("startup")
+# async def create_indexes():
+#     """Create database indexes"""
+#     try:
+#         await db.users.create_index("wallet_address", unique=True)
+#         await db.conversations.create_index("wallet_address")
+#         # Multisig_whitelists index (if used)
+#         await db.multisig_whitelists.create_index("multisig_address")
+#         logger.info("Database indexes created successfully")
+#
+#         # Initialize API clients
+#         await initialize_clients()
+#         logger.info("API clients initialized successfully")
+#     except Exception as e:
+#         logger.error(f"Error creating database indexes: {e}")
+
+# use lifespan instead
+
+# --- FastAPI App Configuration ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Initialize database indexes
+    global okx_client_server, third_party_client_server, db
+    try:
+        await db.users.create_index("wallet_address", unique=True)
+        await db.conversations.create_index("wallet_address")
+        # Multisig_whitelists index (if used)
+        await db.multisig_whitelists.create_index("multisig_address")
+        logger.info("Database indexes created successfully")
+
+        # Initialize API clients
+        await initialize_clients()
+        logger.info("API clients initialized successfully")
+    except Exception as e:
+        logger.error(f"Error creating database indexes: {e}")
+
+    # Initialize the OKX client
+    okx_client_server = OkxWeb3Client(
+        project_id=OKX_WEB3_PROJECT_ID,
+        api_key=OKX_WEB3_PROJECT_KEY,
+        api_secret=OKX_WEB3_PROJECT_SECRET,
+        api_passphrase=OKX_WEB3_PROJECT_PASSWRD,
     )
-except ImportError:
-    # Rename to match your actual file structure
-    from agents.trade_bot_agent import (
-        TradingAssistantDeps, trading_agent, TokenInfo, TradingAnalysis, ThinkingStep
-    )
+    await okx_client_server.initialize()
+    logger.info("OKX client initialized successfully")
 
+    # Initialize the third-party client
+    third_party_client_server = ThirdPartyClient()
+    await third_party_client_server.initialize()
+    logger.info("Third-party client initialized successfully")
 
-    # Define this since we're importing from the new file
-    async def initialize_clients():
-        from agents.trade_bot_agent import initialize_clients as init
-        await init()
+    print(f"App started at {datetime.now()}")
 
+    yield
 
-    # Define run_trading_analysis if not present in the new agent
-    async def run_trading_analysis(query, deps):
-        return await trading_agent.run(query, deps=deps)
+    print(f"App stopped at {datetime.now()}")
+
 
 # Create FastAPI app
-app = FastAPI(title="Trading Assistant API")
+app = FastAPI(title="Trading Assistant API", version="0.1", lifespan=lifespan)
 
 # Add CORS middleware
 app.add_middleware(
@@ -733,23 +805,6 @@ async def user_reject_transaction(
     return {"success": True, "message": "Transaction rejected"}
 
 
-# --- Initialize database indexes ---
-@app.on_event("startup")
-async def create_indexes():
-    """Create database indexes"""
-    try:
-        await db.users.create_index("wallet_address", unique=True)
-        await db.conversations.create_index("wallet_address")
-        # Multisig_whitelists index (if used)
-        await db.multisig_whitelists.create_index("multisig_address")
-        logger.info("Database indexes created successfully")
-
-        # Initialize API clients
-        await initialize_clients()
-        logger.info("API clients initialized successfully")
-    except Exception as e:
-        logger.error(f"Error creating database indexes: {e}")
-
 @app.get("/api/public-data/tickers")
 async def get_tickers():
     """Fetch ticker data for multiple symbols from the Binance API."""
@@ -759,14 +814,158 @@ async def get_tickers():
     ])
     return {"tickers": tickers}
 
+
+class GetWalletDataByChain(BaseModel):
+    wallet_address: str
+    chain_id_list: Optional[List[str]] = None  # ["1", "56", "137", "8453"]
+
+
+@app.post("/api/total-balance")
+async def get_total_balance(data: GetWalletDataByChain):
+    """Get total balance for a wallet address"""
+    res = await okx_client_server.get_total_value_by_address(
+        data.wallet_address,
+        data.chain_id_list
+    )
+    return res
+
+
+@app.post("/api/total-balance-detail")
+async def get_total_balance(data: GetWalletDataByChain):
+    res = await okx_client_server.get_all_token_balances_by_address(
+        data.wallet_address,
+        data.chain_id_list,
+        filter_risk_tokens=True
+    )
+    if not res['data']:
+        return []
+    return await okx_client_server.process_token_data(res)
+
+
+@app.post("/api/wallet-transaction-history")
+async def get_wallet_transaction_history(data: GetWalletDataByChain):
+    res = await okx_client_server.get_transactions_by_address(
+        data.wallet_address,
+        data.chain_id_list
+    )
+    if not res['data']:
+        return []
+    return await okx_client_server.process_transaction_data(res, data.wallet_address)
+
+
 # private data
 @app.get("/wallet-balance")
-async def get_wallet_balance(wallet_address: str, chain_id: str=None):
+async def get_wallet_balance(wallet_address: str, chain_id: str = None):
     """Get wallet balance"""
     return {"wallet_address": wallet_address, "balance": 1000.0}
 
 
-# @app.post("/wallet-transfer")
+# 添加檢查用戶 Agent 狀態的端點
+@app.get("/api/user-status")
+async def check_user_status(wallet_address: str):
+    """
+    檢查指定錢包地址的用戶是否已有 Agent
+
+    參數:
+    - wallet_address: 用戶的錢包地址
+
+    返回:
+    - has_agent: 用戶是否已有 Agent
+    - multisig_address: 如果有 Agent，返回對應的多簽錢包地址
+    """
+    try:
+        # 連接數據庫並查詢用戶狀態
+        # 這裡用您的實際數據庫查詢邏輯替換
+        user = await db.users.find_one({"wallet_address": wallet_address.lower()})
+
+        return {
+            "has_agent": user.get("has_agent", False),
+            "multisig_address": user.get("multisig_address")
+        }
+    except Exception as e:
+        logger.error(f"Error checking user status: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to check user status")
+
+
+class CreateAgent(BaseModel):
+    wallet_address: str
+
+
+# 添加創建 Agent 的端點
+@app.post("/api/create-agent")
+async def create_agent(data: CreateAgent):
+    """
+    為指定錢包地址的用戶創建一個 AI Agent
+
+    請求體:
+    - wallet_address: 用戶的錢包地址
+
+    返回:
+    - success: 是否成功創建 Agent
+    - message: 結果信息
+    - agent_id: 創建的 Agent ID (如果成功)
+    """
+    try:
+        # 解析請求體
+        data = data.model_dump()
+        wallet_address = data["wallet_address"]
+
+        if not wallet_address:
+            raise HTTPException(status_code=400, detail="Wallet address is required")
+
+        # 檢查用戶是否已有 Agent
+        user = await db.users.find_one({"wallet_address": wallet_address.lower()})
+
+        if user and user.get("agent_id"):
+            # 用戶已有 Agent，返回已存在信息
+            return {
+                "success": True,
+                "message": "Agent already exists",
+                "agent_id": user.get("agent_id")
+            }
+
+        # 創建新的 Agent
+        # 這裡添加您的實際 Agent 創建邏輯
+        agent_id = str(uuid.uuid4())  # 生成唯一 ID
+
+        # 創建或更新用戶記錄
+        # await db.users.update_one(
+        #     {"wallet_address": wallet_address.lower()},
+        #     {"$set": {
+        #         "agent_id": agent_id,
+        #         "has_agent": True,
+        #         "created_at": datetime.utcnow(),
+        #         "last_active": datetime.utcnow()
+        #     }},
+        #     upsert=True
+        # )
+        res = await db.users.find_one_and_update(
+            {"wallet_address": wallet_address.lower()},
+            {"$set": {
+                "agent_id": agent_id,
+                "has_agent": True,
+                "created_at": datetime.utcnow(),
+                "last_active": datetime.utcnow()
+            }},
+            upsert=True,
+            return_document=True
+        )
+
+        # 如果需要創建多簽錢包，可以在這裡添加邏輯
+        # multisig_address = await create_multisig_wallet(wallet_address)
+        # 然後更新數據庫中的 multisig_address 字段
+
+        return {
+            "success": True,
+            "message": "Agent created successfully",
+            "agent_id": agent_id
+        }
+    except HTTPException as http_exc:
+        # 重新拋出 HTTP 異常
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Error creating agent: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to create agent")
 
 
 # --- Health check endpoint ---
@@ -778,4 +977,4 @@ async def health_check():
 
 # --- Run application ---
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")
+    uvicorn.run("main:app", host="0.0.0.0", port=7788, log_level="info")

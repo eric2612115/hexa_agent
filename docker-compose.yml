@@ -1,0 +1,8 @@
+services:
+  hexa-agent:  # Service name (you can choose any name)
+    build:
+      context: ./  # The directory containing the Dockerfile
+      dockerfile: ./Dockerfile  # The name of your Dockerfile (optional if it's named Dockerfile)
+    ports:
+      # Host's port : Container's port
+      - "8026:7788"

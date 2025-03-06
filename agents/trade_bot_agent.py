@@ -403,8 +403,8 @@ def setup_detailed_logging():
 
 
 # Call this at the start of your program
-log_file = setup_detailed_logging()
-print(f"Detailed logs will be saved to: {log_file}")
+# log_file = setup_detailed_logging()
+# print(f"Detailed logs will be saved to: {log_file}")
 
 
 class PortfolioRecommendation(BaseModel):
