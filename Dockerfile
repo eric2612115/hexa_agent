@@ -28,5 +28,5 @@ COPY . /app/
 # 開放端口
 EXPOSE 7788
 
-# 直接使用 uvicorn。Poetry 會處理虛擬環境。
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7788", "--http", "auto"] # "--http", "h11"
+# 直接使用 uvicorn。Poetry 會處理虛擬環境。 # "--http", "h11"
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7788", "--http", "auto"]
