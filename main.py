@@ -1,5 +1,5 @@
 # main.py - Integrated backend with new trading agent
-
+import subprocess
 import asyncio
 import json
 import logging
@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Callable, Union
 from uuid import uuid4
+
+from fastapi.openapi.utils import get_openapi
 
 # --- FIX: Add project root to PYTHONPATH ---
 # Get the absolute path to the project root directory
@@ -149,6 +151,29 @@ async def lifespan(app: FastAPI):
 
     print(f"App stopped at {datetime.now()}")
 
+def get_git_version():
+    try:
+        # 執行 git describe 命令，並捕獲輸出
+        version = subprocess.check_output(
+            ["git", "describe", "--tags", "--always", "--dirty"],
+            stderr=subprocess.STDOUT, # 將錯誤輸出合併到標準輸出
+            text=True  # 以文字模式處理輸出
+        ).strip()
+        return version
+    except subprocess.CalledProcessError:
+        return "0.0.0"  # 如果 git 命令失敗，返回預設版本
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title="Trading Assistant API",
+        version=get_git_version(),
+        routes=app.routes,
+    )
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
 
 # Create FastAPI app
 app = FastAPI(title="Trading Assistant API", version="0.1", lifespan=lifespan)
@@ -163,6 +188,8 @@ origins = [
     "http://127.0.0.1:7788",  # 如果你在本地開發前端，也可能需要這個
 ]
 
+app.openapi = custom_openapi
+
 
 # Add CORS middleware
 app.add_middleware(
@@ -172,6 +199,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
 
 # Create MongoDB client
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URL)
