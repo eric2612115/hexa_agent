@@ -180,12 +180,12 @@ app = FastAPI(title="Trading Assistant API", version="0.1", lifespan=lifespan)
 
 origins = [
     "https://gun-ai-wallet.onrender.com",  # 你的前端網址
-    "http://localhost:8000",             # 如果你在本地開發前端，也可能需要這個
-    "http://localhost:3000",             # 如果你的前端在 3000 埠運行
-    "http://127.0.0.1:8026",  # 如果你在本地開發前端，也可能需要這個
-    "http://127.0.0.1:3000",  # 如果你的前端在 3000 埠運行
-    "http://localhost:7788",             # 如果你在本地開發前端，也可能需要這個
-    "http://127.0.0.1:7788",  # 如果你在本地開發前端，也可能需要這個
+    # "http://localhost:8000",             # 如果你在本地開發前端，也可能需要這個
+    # "http://localhost:3000",             # 如果你的前端在 3000 埠運行
+    # "http://127.0.0.1:8026",  # 如果你在本地開發前端，也可能需要這個
+    # "http://127.0.0.1:3000",  # 如果你的前端在 3000 埠運行
+    # "http://localhost:7788",             # 如果你在本地開發前端，也可能需要這個
+    # "http://127.0.0.1:7788",  # 如果你在本地開發前端，也可能需要這個
 ]
 
 app.openapi = custom_openapi
