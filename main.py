@@ -181,12 +181,12 @@ app = FastAPI(title="Trading Assistant API", version="0.1", lifespan=lifespan)
 origins = [
     "https://gun-ai-wallet.onrender.com",  # 你的前端網址
     "wss://gun-wallet-backend.zionpannel.com",  # 你的後端 WebSocket 網址
-    # "http://localhost:8000",             # 如果你在本地開發前端，也可能需要這個
-    # "http://localhost:3000",             # 如果你的前端在 3000 埠運行
-    # "http://127.0.0.1:8026",  # 如果你在本地開發前端，也可能需要這個
-    # "http://127.0.0.1:3000",  # 如果你的前端在 3000 埠運行
-    # "http://localhost:7788",             # 如果你在本地開發前端，也可能需要這個
-    # "http://127.0.0.1:7788",  # 如果你在本地開發前端，也可能需要這個
+    "http://localhost:8000",             # 如果你在本地開發前端，也可能需要這個
+    "http://localhost:3000",             # 如果你的前端在 3000 埠運行
+    "http://127.0.0.1:8026",  # 如果你在本地開發前端，也可能需要這個
+    "http://127.0.0.1:3000",  # 如果你的前端在 3000 埠運行
+    "http://localhost:7788",             # 如果你在本地開發前端，也可能需要這個
+    "http://127.0.0.1:7788",  # 如果你在本地開發前端，也可能需要這個
 ]
 
 app.openapi = custom_openapi
@@ -804,6 +804,8 @@ async def user_signature(
 
     await save_message(wallet_address, completion_message)
 
+    # TODO should update multi-sig wallet data in db.users
+
     if wallet_address in manager.active_connections:
         await manager.send_message(wallet_address, completion_message)
 
@@ -844,6 +846,27 @@ async def user_reject_transaction(
         await manager.send_message(wallet_address, rejection_message)
 
     return {"success": True, "message": "Transaction rejected"}
+
+@app.get("/api/get-wallets-related-multi-sig-wallets")
+async def get_wallets_related_multi_sig_wallets(wallet_address: str):
+    """Get wallets related to a multi-sig wallet"""
+    # check wallet already exists
+    # res = await db.user.find(
+    #     {"wallet_address": wallet_address},
+    #     {"_id": 0, "multisig_address": 1}
+    # ).to_list(length=None)
+    # if not res:
+    #     return []
+    # multisig_address = res.get("multisig_address", None)
+    # if not multisig_address:
+    #     return []
+    # # get related wallets
+    # return multisig_address
+    mock_address_list = [
+        {"name": "multi-1", "multisig_address": "0x1234567890"},
+        {"name": "multi-2", "multisig_address": "0x13456787654"},
+    ]
+    return mock_address_list
 
 
 @app.get("/api/public-data/tickers")

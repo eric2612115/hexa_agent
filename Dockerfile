@@ -29,4 +29,4 @@ COPY . /app/
 EXPOSE 7788
 
 # 直接使用 uvicorn。Poetry 會處理虛擬環境。
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7788"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7788", "--http", "auto"] # "--http", "h11"
