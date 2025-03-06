@@ -62,6 +62,8 @@ OKX_WEB3_PROJECT_KEY = os.getenv("OKX_WEB3_PROJECT_KEY")
 OKX_WEB3_PROJECT_SECRET = os.getenv("OKX_WEB3_PROJECT_SECRET")
 OKX_WEB3_PROJECT_PASSWRD = os.getenv("OKX_WEB3_PROJECT_PASSWRD")
 
+CAVE_API_KEY = os.getenv("CAVE_WEB3_PROJECT_API_KEY")
+
 # MongoDB configuration
 MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
 print(f"MongoDB URL: {str(MONGODB_URL)[:10]}...{str(MONGODB_URL)[5:]}")
@@ -76,6 +78,7 @@ from agents.trade_bot_agent import (
 )
 from agents.dex_api_client.okx_web3_client import OkxWeb3Client
 from agents.dex_api_client.third_client import ThirdPartyClient
+from agents.dex_api_client.cave_client import CaveClient
 
 
 # Define this since we're importing from the new file
@@ -91,6 +94,7 @@ async def run_trading_analysis(query, deps):
 
 okx_client_server: OkxWeb3Client = None
 third_party_client_server: ThirdPartyClient = None
+cave_client: CaveClient = None
 
 
 # --- Initialize database indexes ---
@@ -116,7 +120,7 @@ third_party_client_server: ThirdPartyClient = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize database indexes
-    global okx_client_server, third_party_client_server, db
+    global okx_client_server, third_party_client_server, db, cave_client
     try:
         await db.users.create_index("wallet_address", unique=True)
         await db.conversations.create_index("wallet_address")
@@ -145,23 +149,29 @@ async def lifespan(app: FastAPI):
     await third_party_client_server.initialize()
     logger.info("Third-party client initialized successfully")
 
+    # Initialize the Cave client
+    cave_client = CaveClient(CAVE_API_KEY)
+    await cave_client.initialize()
+
     print(f"App started at {datetime.now()}")
 
     yield
 
     print(f"App stopped at {datetime.now()}")
 
+
 def get_git_version():
     try:
         # 執行 git describe 命令，並捕獲輸出
         version = subprocess.check_output(
             ["git", "describe", "--tags", "--always", "--dirty"],
-            stderr=subprocess.STDOUT, # 將錯誤輸出合併到標準輸出
+            stderr=subprocess.STDOUT,  # 將錯誤輸出合併到標準輸出
             text=True  # 以文字模式處理輸出
         ).strip()
         return version
     except subprocess.CalledProcessError:
         return "0.0.0"  # 如果 git 命令失敗，返回預設版本
+
 
 def custom_openapi():
     if app.openapi_schema:
@@ -181,16 +191,15 @@ app = FastAPI(title="Trading Assistant API", version="0.1", lifespan=lifespan)
 origins = [
     "https://gun-ai-wallet.onrender.com",  # 你的前端網址
     "wss://gun-wallet-backend.zionpannel.com",  # 你的後端 WebSocket 網址
-    "http://localhost:8000",             # 如果你在本地開發前端，也可能需要這個
-    "http://localhost:3000",             # 如果你的前端在 3000 埠運行
+    "http://localhost:8000",  # 如果你在本地開發前端，也可能需要這個
+    "http://localhost:3000",  # 如果你的前端在 3000 埠運行
     "http://127.0.0.1:8026",  # 如果你在本地開發前端，也可能需要這個
     "http://127.0.0.1:3000",  # 如果你的前端在 3000 埠運行
-    "http://localhost:7788",             # 如果你在本地開發前端，也可能需要這個
+    "http://localhost:7788",  # 如果你在本地開發前端，也可能需要這個
     "http://127.0.0.1:7788",  # 如果你在本地開發前端，也可能需要這個
 ]
 
 app.openapi = custom_openapi
-
 
 # Add CORS middleware
 app.add_middleware(
@@ -200,8 +209,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
 
 # Create MongoDB client
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URL)
@@ -846,6 +853,30 @@ async def user_reject_transaction(
         await manager.send_message(wallet_address, rejection_message)
 
     return {"success": True, "message": "Transaction rejected"}
+
+
+@app.get("/api/get-cave-news")
+async def get_cave_news():
+    """Get news from Cave API"""
+    res = cave_client.process_news_data(await cave_client.fetch_news_data())
+    return res
+
+
+class GetDailyReport(BaseModel):
+    year: int
+    month: int
+    day: int
+
+
+@app.post("/api/get-daily-report")
+async def get_daily_report(date: GetDailyReport):
+    """Get daily report for a specific date"""
+    from agents.daily_report_mock.daily_report_2025_03_06 import report_data
+    report_data['metadata']['created_at'] = datetime.now().isoformat()
+    report_data['report']['date'] = f"{date.year}-{date.month}-{date.day}"
+    report_data['report']['id'] = str(uuid4())
+    return report_data
+
 
 @app.get("/api/get-wallets-related-multi-sig-wallets")
 async def get_wallets_related_multi_sig_wallets(wallet_address: str):
