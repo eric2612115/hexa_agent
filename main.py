@@ -194,7 +194,7 @@ app.openapi = custom_openapi
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, restrict to specific origins
+    allow_origins=origins,  # In production, restrict to specific origins
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
