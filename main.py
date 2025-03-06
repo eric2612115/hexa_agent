@@ -180,6 +180,7 @@ app = FastAPI(title="Trading Assistant API", version="0.1", lifespan=lifespan)
 
 origins = [
     "https://gun-ai-wallet.onrender.com",  # 你的前端網址
+    "wss://gun-wallet-backend.zionpannel.com",  # 你的後端 WebSocket 網址
     # "http://localhost:8000",             # 如果你在本地開發前端，也可能需要這個
     # "http://localhost:3000",             # 如果你的前端在 3000 埠運行
     # "http://127.0.0.1:8026",  # 如果你在本地開發前端，也可能需要這個
